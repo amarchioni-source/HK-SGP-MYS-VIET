@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Sanitarios Malasia - Azul Natural Beef</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: #f0f2f5;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 32px 16px;
+    }
+    .card {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 2px 16px rgba(0,0,0,0.10);
+      padding: 36px 40px;
+      width: 100%;
+      max-width: 580px;
+    }
+    .logo-header {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 28px;
+      border-bottom: 2px solid #e5e7eb;
+      padding-bottom: 20px;
+    }
+    .logo-circle {
+      width: 48px; height: 48px;
+      background: #1a3a5c;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-weight: 700; font-size: 18px;
+    }
+    .logo-text h1 { font-size: 18px; color: #1a3a5c; font-weight: 700; }
+    .logo-text p  { font-size: 13px; color: #6b7280; margin-top: 2px; }
+    .form-group { margin-bottom: 20px; }
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: #374151;
+      margin-bottom: 2px;
+    }
+    .hint {
+      font-size: 11px;
+      color: #9ca3af;
+      margin-bottom: 6px;
+      display: block;
+    }
+    .badge {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 1px 6px;
+      border-radius: 4px;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+    .badge-xlsx { background: #d1fae5; color: #065f46; }
+    .badge-pdf  { background: #fee2e2; color: #991b1b; }
+    input[type="text"], select {
+      width: 100%;
+      padding: 10px 14px;
+      border: 1.5px solid #d1d5db;
+      border-radius: 8px;
+      font-size: 15px;
+      color: #111827;
+      transition: border-color 0.2s;
+      background: white;
+    }
+    input[type="text"]:focus, select:focus {
+      outline: none;
+      border-color: #1a3a5c;
+    }
+    .radio-group {
+      display: flex;
+      gap: 12px;
+      margin-top: 4px;
+    }
+    .radio-option {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border: 1.5px solid #d1d5db;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+      color: #374151;
+      transition: all 0.2s;
+      user-select: none;
+    }
+    .radio-option:hover {
+      border-color: #1a3a5c;
+      background: #f0f6ff;
+    }
+    .radio-option.selected {
+      border-color: #1a3a5c;
+      background: #1a3a5c;
+      color: white;
+    }
+    .radio-option input[type="radio"] { display: none; }
+    .file-drop {
+      border: 2px dashed #d1d5db;
+      border-radius: 8px;
+      padding: 18px 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+      position: relative;
+      background: #fafafa;
+    }
+    .file-drop:hover, .file-drop.drag-over {
+      border-color: #1a3a5c;
+      background: #eff6ff;
+    }
+    .file-drop input[type="file"] {
+      position: absolute; inset: 0;
+      opacity: 0; cursor: pointer; width: 100%; height: 100%;
+    }
+    .file-drop .icon { font-size: 24px; margin-bottom: 4px; }
+    .file-drop .label { font-size: 13px; color: #6b7280; }
+    .file-drop .label strong { color: #1a3a5c; }
+    .file-drop .filename {
+      margin-top: 6px;
+      font-size: 13px;
+      color: #059669;
+      font-weight: 600;
+    }
+    .btn-generar {
+      width: 100%;
+      padding: 14px;
+      background: #1a3a5c;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.2s;
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+    }
+    .btn-generar:hover:not(:disabled) { background: #15304d; }
+    .btn-generar:disabled { background: #9ca3af; cursor: not-allowed; }
+    .spinner {
+      display: none;
+      width: 20px; height: 20px;
+      border: 3px solid rgba(255,255,255,0.4);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .result-box {
+      display: none;
+      margin-top: 20px;
+      padding: 16px;
+      border-radius: 8px;
+    }
+    .result-ok    { background: #f0fdf4; border: 1.5px solid #86efac; }
+    .result-error { background: #fef2f2; border: 1.5px solid #fca5a5; }
+    .result-box h3 { font-size: 15px; font-weight: 700; margin-bottom: 8px; }
+    .result-ok h3    { color: #15803d; }
+    .result-error h3 { color: #b91c1c; }
+    .result-box ul { list-style: none; padding: 0; }
+    .result-box ul li { font-size: 13px; padding: 3px 0; color: #374151; }
+    .alerta-item {
+      background: #fffbeb;
+      border: 1px solid #fcd34d;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 13px;
+      color: #92400e;
+      margin-top: 8px;
+    }
+    .divider { border: none; border-top: 1.5px solid #e5e7eb; margin: 24px 0; }
+    .instrucciones { font-size: 12px; color: #6b7280; line-height: 1.6; }
+    .instrucciones strong { color: #374151; }
+    .ocr-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: #ede9fe;
+      color: #5b21b6;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 4px;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+  </style>
+</head>
+<body>
+<div class="card">
+  <div class="logo-header">
+    <div class="logo-circle">AN</div>
+    <div class="logo-text">
+      <h1>Sanitarios Malasia</h1>
+      <p>Azul Natural Beef S.A. &mdash; Establecimiento 5039</p>
+    </div>
+  </div>
+
+  <form id="form-sanitario" enctype="multipart/form-data">
+
+    <div class="form-group">
+      <label>Número de Shipment</label>
+      <input type="text" name="shipment_no" id="shipment_no" placeholder="Ej: 9649-6" autocomplete="off"/>
+    </div>
+
+    <div class="form-group">
+      <label>Vía de transporte</label>
+      <div class="radio-group">
+        <label class="radio-option" id="opt-aereo" onclick="seleccionarVia('aereo')">
+          <input type="radio" name="tipo_via" value="aereo" id="radio-aereo"/>
+          ✈️ Aéreo
+        </label>
+        <label class="radio-option" id="opt-maritimo" onclick="seleccionarVia('maritimo')">
+          <input type="radio" name="tipo_via" value="maritimo" id="radio-maritimo"/>
+          🚢 Marítimo
+        </label>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>
+        Sanitario Provisorio
+        <span class="ocr-badge">⚡ OCR automático</span>
+        <span class="badge badge-pdf">PDF</span>
+      </label>
+      <span class="hint">El PDF escaneado del certificado SENASA provisorio</span>
+      <div class="file-drop" id="drop-sanitario">
+        <input type="file" name="sanitario" id="input-sanitario" accept=".pdf"
+               onchange="mostrarNombre(this,'nombre-sanitario')"/>
+        <div class="icon">📄</div>
+        <div class="label"><strong>Clic para elegir</strong> o arrastrar aquí</div>
+        <div class="filename" id="nombre-sanitario"></div>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>Reporte DOC <span class="badge badge-xlsx">XLSX</span></label>
+      <span class="hint">Ej: REPORTE_DOC_27_04_DEVESA_XXXXX.xlsx</span>
+      <div class="file-drop" id="drop-reporte">
+        <input type="file" name="reporte" id="input-reporte" accept=".xlsx"
+               onchange="mostrarNombre(this,'nombre-reporte')"/>
+        <div class="icon">📊</div>
+        <div class="label"><strong>Clic para elegir</strong> o arrastrar aquí</div>
+        <div class="filename" id="nombre-reporte"></div>
+      </div>
+    </div>
+
+    <button type="submit" class="btn-generar" id="btn-generar">
+      <span id="btn-texto">Generar Sanitario</span>
+      <div class="spinner" id="spinner"></div>
+    </button>
+  </form>
+
+  <div class="result-box" id="result-box"></div>
+
+  <hr class="divider"/>
+  <div class="instrucciones">
+    <strong>Cómo usar:</strong> subí el sanitario provisorio (PDF escaneado) y el Reporte DOC,
+    ingresá el número de shipment, elegí la vía y hacé clic en Generar.<br/>
+    El sistema lee el PDF automáticamente y completa el certificado oficial.
+  </div>
+</div>
+
+<script>
+  function seleccionarVia(via) {
+    document.getElementById('radio-' + via).checked = true;
+    document.getElementById('opt-aereo').classList.toggle('selected', via === 'aereo');
+    document.getElementById('opt-maritimo').classList.toggle('selected', via === 'maritimo');
+  }
+
+  function mostrarNombre(input, id) {
+    const el = document.getElementById(id);
+    if (input.files && input.files[0]) {
+      el.textContent = '✓ ' + input.files[0].name;
+    }
+  }
+
+  document.querySelectorAll('.file-drop').forEach(zone => {
+    zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+    zone.addEventListener('drop', () => zone.classList.remove('drag-over'));
+  });
+
+  document.getElementById('form-sanitario').addEventListener('submit', async function(e) {
+    e.preventDefault();
+
+    const btn     = document.getElementById('btn-generar');
+    const texto   = document.getElementById('btn-texto');
+    const spinner = document.getElementById('spinner');
+    const box     = document.getElementById('result-box');
+
+    const shipment  = document.getElementById('shipment_no').value.trim();
+    const tipo_via  = document.querySelector('input[name="tipo_via"]:checked')?.value || '';
+    const sanitario = this.sanitario.files[0];
+    const reporte   = this.reporte.files[0];
+
+    if (!shipment || !tipo_via || !sanitario || !reporte) {
+      mostrarError(['Completá todos los campos, seleccioná la vía y subí ambos archivos.']);
+      return;
+    }
+
+    btn.disabled = true;
+    texto.style.display = 'none';
+    spinner.style.display = 'block';
+    box.style.display = 'none';
+
+    try {
+      const fd = new FormData(this);
+      const resp = await fetch('/generar', { method: 'POST', body: fd });
+
+      if (resp.ok) {
+        const alertasHeader = resp.headers.get('X-Alertas') || '';
+        const blob = await resp.blob();
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        const cd   = resp.headers.get('Content-Disposition') || '';
+        const match = cd.match(/filename="?([^"]+)"?/);
+        a.download = match ? match[1] : `Sanitario_Malasia_${tipo_via}_${shipment}.docx`;
+        a.href = url;
+        a.click();
+        URL.revokeObjectURL(url);
+        mostrarOk(alertasHeader ? alertasHeader.split(' | ') : []);
+      } else {
+        const data = await resp.json();
+        mostrarError(data.errores || ['Error desconocido al generar.']);
+      }
+    } catch (err) {
+      mostrarError(['Error de conexión: ' + err.message]);
+    } finally {
+      btn.disabled = false;
+      texto.style.display = 'inline';
+      spinner.style.display = 'none';
+    }
+  });
+
+  function mostrarOk(alertas) {
+    const box = document.getElementById('result-box');
+    box.className = 'result-box result-ok';
+    let html = '<h3>✓ Listo — revisá tu carpeta de descargas</h3>';
+    alertas.forEach(a => { html += `<div class="alerta-item">⚠️ ${a}</div>`; });
+    box.innerHTML = html;
+    box.style.display = 'block';
+  }
+
+  function mostrarError(errores) {
+    const box = document.getElementById('result-box');
+    box.className = 'result-box result-error';
+    let html = '<h3>No se pudo generar el sanitario</h3><ul>';
+    errores.forEach(e => html += `<li>- ${e}</li>`);
+    html += '</ul>';
+    box.innerHTML = html;
+    box.style.display = 'block';
+  }
+</script>
+</body>
+</html>
