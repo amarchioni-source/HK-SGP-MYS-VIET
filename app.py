@@ -19,6 +19,7 @@ def index():
 @app.route('/generar', methods=['POST'])
 def generar():
     try:
+        piqueo_f    = request.files.get('piqueo')
         reporte_f   = request.files.get('reporte')
         sanitario_f = request.files.get('sanitario')
         remito_f    = request.files.get('remito')
@@ -26,6 +27,7 @@ def generar():
         tipo_via    = request.form.get('tipo_via', '').strip()
 
         errores = []
+        if not piqueo_f:    errores.append('Falta el Piqueo (.xlsx)')
         if not reporte_f:   errores.append('Falta el Reporte DOC (.xlsx)')
         if not sanitario_f: errores.append('Falta el Sanitario Provisorio (PDF)')
         if not remito_f:    errores.append('Falta el Remito (PDF)')
@@ -34,11 +36,13 @@ def generar():
         if errores:
             return jsonify({'ok': False, 'errores': errores}), 400
 
+        datos_piqueo = leer_piqueo(piqueo_f)
         reporte      = leer_reporte(reporte_f, shipment)
         datos_remito = leer_remito(remito_f.read())
         datos_prov   = leer_sanitario_provisorio(sanitario_f.read())
 
-        datos = {**datos_remito, **datos_prov}
+        # Combinar: remito base, fechas del piqueo, pallets del provisorio
+        datos = {**datos_remito, **datos_piqueo, **datos_prov}
         for prod in datos.get('productos', []):
             cod = prod.get('codigo', '')
             if cod in reporte.get('descripciones', {}):
@@ -74,6 +78,50 @@ def generar():
         import traceback
         return jsonify({'ok': False, 'errores': [str(e), traceback.format_exc()]}), 500
 
+
+# ── PIQUEO (xlsx) - fechas ────────────────────────────────────────────────────
+
+def leer_piqueo(file):
+    wb = openpyxl.load_workbook(file)
+    ws = wb.active
+
+    faena_min = faena_max = None
+    prod_min  = prod_max  = None
+    venc_min  = venc_max  = None
+
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not row or not row[1]:
+            continue
+        fecha_f   = row[7]   # col H = Fecha F (faena)
+        fecha_p   = row[6]   # col G = Fecha P (produccion)
+        fecha_ven = row[10]  # col K = Fecha Ven (vencimiento)
+
+        if isinstance(fecha_f, datetime.datetime):
+            faena_min = min(faena_min, fecha_f) if faena_min else fecha_f
+            faena_max = max(faena_max, fecha_f) if faena_max else fecha_f
+        if isinstance(fecha_p, datetime.datetime):
+            prod_min = min(prod_min, fecha_p) if prod_min else fecha_p
+            prod_max = max(prod_max, fecha_p) if prod_max else fecha_p
+        if isinstance(fecha_ven, datetime.datetime):
+            venc_min = min(venc_min, fecha_ven) if venc_min else fecha_ven
+            venc_max = max(venc_max, fecha_ven) if venc_max else fecha_ven
+
+    def fmt_rango(d_min, d_max):
+        if not d_min:
+            return None
+        s = d_min.strftime('%d/%m/%Y')
+        if d_max and d_max != d_min:
+            s += ' al ' + d_max.strftime('%d/%m/%Y')
+        return s
+
+    return {
+        'fecha_faena':       fmt_rango(faena_min, faena_max),
+        'fecha_produccion':  fmt_rango(prod_min,  prod_max),
+        'fecha_vencimiento': fmt_rango(venc_min,  venc_max),
+    }
+
+
+# ── REPORTE DOC (xlsx) ────────────────────────────────────────────────────────
 
 def leer_reporte(file, shipment):
     wb = openpyxl.load_workbook(file)
@@ -111,6 +159,8 @@ def leer_reporte(file, shipment):
     return d
 
 
+# ── UTILIDADES NUMÉRICAS ──────────────────────────────────────────────────────
+
 def limpiar_num(s):
     if not s:
         return None
@@ -132,6 +182,8 @@ def limpiar_num(s):
     except Exception:
         return s
 
+
+# ── REMITO (fitz) ────────────────────────────────────────────────────────────
 
 def leer_remito(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype='pdf')
@@ -192,6 +244,8 @@ def leer_remito(pdf_bytes):
     return datos
 
 
+# ── SANITARIO PROVISORIO (OCR - solo pallets y KGS) ──────────────────────────
+
 def ocr_pdf(pdf_bytes):
     texto = ''
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -213,40 +267,22 @@ def ocr_pdf(pdf_bytes):
 
 
 def leer_sanitario_provisorio(pdf_bytes):
+    # Solo extraemos pallets y KGS del provisorio via OCR
+    # Las fechas vienen del piqueo
     texto = ocr_pdf(pdf_bytes)
     datos = {}
-
-    def extraer_fecha(etiqueta):
-        # Buscar linea por linea, saltando descripciones de producto y Faenador
-        for line in texto.split('\n'):
-            if re.search(r'\(F\.', line):
-                continue
-            if re.search(r'Faenador', line, re.IGNORECASE):
-                continue
-            m = re.search(
-                r'(?<![a-zA-Z])' + etiqueta + r'[^0-9]*(\d{2}/\d{2}/\d{4})',
-                line, re.IGNORECASE
-            )
-            if m:
-                fecha_inicio = m.group(1)
-                resto = line[m.end():m.end()+40]
-                m2 = re.match(r'\s*al?\s*(\d{2}/\d{2}/\d{4})', resto, re.IGNORECASE)
-                if m2:
-                    return fecha_inicio + ' al ' + m2.group(1)
-                return fecha_inicio
-        return None
-
-    datos['fecha_faena']       = extraer_fecha(r'Faena')
-    datos['fecha_produccion']  = extraer_fecha(r'Producci[oo]n')
-    datos['fecha_vencimiento'] = extraer_fecha(r'Vencimiento')
-
-    m_kg = re.search(r'EN\s+\d+\s+PALLETS?[:\s]+(\d[\d\.]*)',
-                     texto, re.IGNORECASE)
-    datos['kg_pallets'] = limpiar_num(m_kg.group(1)) if m_kg else None
-
+    # Pallets: 'ACONDICIONADA EN 14 PALLETS: 614.02KGS'
+    m_kg = re.search(r'EN\s+(\d+)\s+PALLETS?[:\s]+(\d[\d\.]*)', texto, re.IGNORECASE)
+    if m_kg:
+        datos['pallets_prov']  = m_kg.group(1)   # solo como respaldo
+        datos['kg_pallets']    = limpiar_num(m_kg.group(2))
+    else:
+        datos['kg_pallets'] = None
     datos['fecha_emision'] = datetime.datetime.now().strftime('%d/%m/%Y')
     return datos
 
+
+# ── MAPAS NOMBRE ─────────────────────────────────────────────────────────────
 
 MAPA_EN = {
     'BOLA DE LOMO':              'KNUCKLE',
@@ -308,6 +344,8 @@ def armar_nombre_bilingue(nombre_es, nombre_en):
     return es
 
 
+# ── GENERACION DOCX ──────────────────────────────────────────────────────────
+
 def get_trs(xml):
     return list(re.finditer(r'<w:tr[ >]', xml))
 
@@ -355,14 +393,9 @@ def _get_fila_por_contenido(xml, trs, texto_clave):
 
 
 def _reemplazar_pallets_en_fila(fila_xml, pallets, kg_pallets):
-    # La fila tiene: 'ACONDICIONADO EN 1 PALLET / ACONDITIONED IN ' | '1' | ' PALLET' | '32.44'
-    # Reemplazar el numero en el texto largo
     fila_xml = re.sub(r'(ACONDICIONADO EN )\d+( PALLET)', r'\g<1>' + str(pallets) + r'\2', fila_xml)
     fila_xml = re.sub(r'(ACONDITIONED IN )\d+( PALLET)', r'\g<1>' + str(pallets) + r'\2', fila_xml)
-    # Reemplazar el '1' separado (segunda celda/w:t con solo el numero)
-    # Buscar w:t que contenga solo un numero pequeño (el de pallets)
     fila_xml = re.sub(r'(<w:t[^>]*>)1(</w:t>)', r'\g<1>' + str(pallets) + r'\2', fila_xml, count=1)
-    # Reemplazar kg pallets (32.44)
     if kg_pallets:
         fila_xml = re.sub(r'(<w:t[^>]*>)32\.44(</w:t>)', r'\g<1>' + str(kg_pallets) + r'\2', fila_xml)
     return fila_xml
@@ -385,16 +418,20 @@ def _reemplazar_bloque_productos(xml, trs, primera_idx, total_idx_fallback,
             prod.get('neto', ''), prod.get('bruto', '')
         )
 
-    # Fila de pallets actualizada
     nueva_pal = _reemplazar_pallets_en_fila(fila_pal, pallets, kg_pallets) if fila_pal else ''
 
-    # Totales
+    # Calcular total bruto incluyendo kg pallets
+    try:
+        total_bruto_final = '{:.2f}'.format(float(total_bruto) + float(kg_pallets or 0))
+    except Exception:
+        total_bruto_final = total_bruto
+
     nums_tot = re.findall(r'<w:t[^>]*>(\d[\d\.]*)</w:t>', fila_total)
     nueva_total = fila_total
     if len(nums_tot) >= 3:
         nueva_total = nueva_total.replace('>' + nums_tot[0] + '<', '>' + str(total_cajas) + '<', 1)
         nueva_total = nueva_total.replace('>' + nums_tot[1] + '<', '>' + str(total_neto) + '<', 1)
-        nueva_total = nueva_total.replace('>' + nums_tot[2] + '<', '>' + str(total_bruto) + '<', 1)
+        nueva_total = nueva_total.replace('>' + nums_tot[2] + '<', '>' + str(total_bruto_final) + '<', 1)
 
     return xml[:ini_mod] + nuevas_filas + nueva_pal + nueva_total + xml[fin_tot:]
 
@@ -403,14 +440,14 @@ def fmt_fecha_aereo(f):
     if f and ' al ' in f.lower():
         partes = re.split(r'\s+al\s+', f, flags=re.IGNORECASE)
         return partes[0] + ' AL/TO ' + partes[1]
-    return f
+    return f or ''
 
 
 def fmt_fecha_maritimo(f):
     if f and ' al ' in f.lower():
         partes = re.split(r'\s+al\s+', f, flags=re.IGNORECASE)
         return partes[0] + ' AL ' + partes[1]
-    return f
+    return f or ''
 
 
 def generar_sanitario(docx_bytes, datos, tipo_via):
