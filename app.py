@@ -375,8 +375,8 @@ def _construir_fila_aereo(fila_modelo, cajas, nombre_bi, neto, bruto):
     nueva = fila_modelo
     nueva = _reemplazar_celda(nueva, 0, str(cajas))
     nueva = _reemplazar_celda(nueva, 1, nombre_bi)
-    nueva = _reemplazar_celda(nueva, 5, str(neto))
-    nueva = _reemplazar_celda(nueva, 6, str(bruto))
+    nueva = _reemplazar_celda(nueva, 6, str(neto))
+    nueva = _reemplazar_celda(nueva, 7, str(bruto))
     return nueva
 
 
@@ -389,10 +389,36 @@ def _construir_fila_maritimo(fila_modelo, cajas, nombre_bi, neto, bruto):
     return nueva
 
 
+def _get_fila_por_contenido(xml, trs, texto_clave):
+    """Busca una fila por texto que contiene."""
+    for i, m in enumerate(trs):
+        ini = m.start()
+        fin = trs[i+1].start() if i+1 < len(trs) else len(xml)
+        fila = xml[ini:fin]
+        if texto_clave in fila:
+            return fila, ini, fin, i
+    return None, None, None, None
+
+
 def _reemplazar_bloque_productos(xml, trs, primera_idx, total_idx, productos,
                                   total_cajas, total_neto, total_bruto, tipo_via):
-    fila_modelo, ini_mod, _      = get_fila_xml(xml, trs, primera_idx)
-    fila_total,  ini_tot, fin_tot = get_fila_xml(xml, trs, total_idx)
+    # Buscar fila modelo (primera fila de producto) por índice fijo
+    fila_modelo, ini_mod, _, _ = None, None, None, None
+
+    # Buscar fila de totales dinámicamente por contenido (total de cajas conocido o texto)
+    # La fila de totales tiene SOLO números grandes sin descripción
+    # Buscar la fila de ACONDICIONADO (pallets) primero
+    fila_pallets, ini_pal, fin_pal, idx_pal = _get_fila_por_contenido(xml, trs, 'ACONDICIONADO EN')
+
+    # La fila de totales está justo después de la fila de pallets
+    if idx_pal is not None:
+        total_idx_real = idx_pal + 1
+    else:
+        total_idx_real = total_idx
+
+    fila_modelo, ini_mod, _, _ = get_fila_xml(xml, trs, primera_idx)[:3] + (None,)
+    fila_modelo, ini_mod, _ = get_fila_xml(xml, trs, primera_idx)
+    fila_total, ini_tot, fin_tot = get_fila_xml(xml, trs, total_idx_real)
 
     nuevas_filas = ''
     for prod in productos:
@@ -451,7 +477,7 @@ def _gen_aereo(xml, datos):
 
     trs = get_trs(xml)
     xml = _reemplazar_bloque_productos(
-        xml, trs, primera_idx=5, total_idx=19,
+        xml, trs, primera_idx=5, total_idx=19,  # total_idx es fallback, se busca dinámicamente
         productos=productos,
         total_cajas=total_cajas, total_neto=total_neto, total_bruto=total_bruto,
         tipo_via='aereo'
@@ -470,9 +496,15 @@ def _gen_aereo(xml, datos):
     f_faena = datos.get('fecha_faena', '')
     f_prod  = datos.get('fecha_produccion', '')
     f_venc  = datos.get('fecha_vencimiento', '')
-    if f_faena: xml = xml.replace('>16/12/2025<', f'>{f_faena}<')
-    if f_prod:  xml = xml.replace('>20/12/2025 AL/TO 22/12/2025<', f'>{f_prod}<')
-    if f_venc:  xml = xml.replace('>19/04/2026 AL/TO 21/04/2026<', f'>{f_venc}<')
+    # Convertir formato "DD/MM/YYYY al DD/MM/YYYY" a "DD/MM/YYYY AL/TO DD/MM/YYYY"
+    def fmt_fecha_aereo(f):
+        if f and ' al ' in f.lower():
+            partes = re.split(r'\s+al\s+', f, flags=re.IGNORECASE)
+            return f'{partes[0]} AL/TO {partes[1]}'
+        return f
+    if f_faena: xml = xml.replace('>16/12/2025<', f'>{fmt_fecha_aereo(f_faena)}<')
+    if f_prod:  xml = xml.replace('>20/12/2025 AL/TO 22/12/2025<', f'>{fmt_fecha_aereo(f_prod)}<')
+    if f_venc:  xml = xml.replace('>19/04/2026 AL/TO 21/04/2026<', f'>{fmt_fecha_aereo(f_venc)}<')
 
     # Transporte
     transporte = datos.get('transporte', '')
@@ -503,7 +535,7 @@ def _gen_maritimo(xml, datos):
 
     trs = get_trs(xml)
     xml = _reemplazar_bloque_productos(
-        xml, trs, primera_idx=5, total_idx=15,
+        xml, trs, primera_idx=5, total_idx=15,  # total_idx es fallback, se busca dinámicamente
         productos=productos,
         total_cajas=total_cajas, total_neto=total_neto, total_bruto=total_bruto,
         tipo_via='maritimo'
@@ -522,9 +554,14 @@ def _gen_maritimo(xml, datos):
     f_faena = datos.get('fecha_faena', '')
     f_prod  = datos.get('fecha_produccion', '')
     f_venc  = datos.get('fecha_vencimiento', '')
-    if f_faena: xml = xml.replace('>28/05/2026 AL 05/06/2026<', f'>{f_faena}<')
-    if f_prod:  xml = xml.replace('>03/06/2026 AL 10/06/2026<', f'>{f_prod}<')
-    if f_venc:  xml = xml.replace('>01/10/2026 AL 08/10/2026<', f'>{f_venc}<')
+    def fmt_fecha_maritimo(f):
+        if f and ' al ' in f.lower():
+            partes = re.split(r'\s+al\s+', f, flags=re.IGNORECASE)
+            return f'{partes[0]} AL {partes[1]}'
+        return f
+    if f_faena: xml = xml.replace('>28/05/2026 AL 05/06/2026<', f'>{fmt_fecha_maritimo(f_faena)}<')
+    if f_prod:  xml = xml.replace('>03/06/2026 AL 10/06/2026<', f'>{fmt_fecha_maritimo(f_prod)}<')
+    if f_venc:  xml = xml.replace('>01/10/2026 AL 08/10/2026<', f'>{fmt_fecha_maritimo(f_venc)}<')
 
     # Transporte
     transporte = datos.get('transporte', '')
