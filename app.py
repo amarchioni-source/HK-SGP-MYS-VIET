@@ -217,21 +217,24 @@ def leer_sanitario_provisorio(pdf_bytes):
     datos = {}
 
     def extraer_fecha(etiqueta):
-        # Busca etiqueta seguida de la primera fecha, luego el rango 'al DD/MM/YYYY'
-        # Usa lookbehind negativo para evitar 'Faenador'
-        m = re.search(
-            r'(?<![a-zA-Z])' + etiqueta + r'[^0-9]*(\d{2}/\d{2}/\d{4})',
-            texto, re.IGNORECASE
-        )
-        if not m:
-            return None
-        fecha_inicio = m.group(1)
-        # Buscar rango en los 30 chars siguientes
-        resto = texto[m.end():m.end()+40]
-        m2 = re.match(r'\s*al?\s*(\d{2}/\d{2}/\d{4})', resto, re.IGNORECASE)
-        if m2:
-            return fecha_inicio + ' al ' + m2.group(1)
-        return fecha_inicio
+        # Buscar linea por linea, saltando descripciones de producto y Faenador
+        for line in texto.split('\n'):
+            if re.search(r'\(F\.', line):
+                continue
+            if re.search(r'Faenador', line, re.IGNORECASE):
+                continue
+            m = re.search(
+                r'(?<![a-zA-Z])' + etiqueta + r'[^0-9]*(\d{2}/\d{2}/\d{4})',
+                line, re.IGNORECASE
+            )
+            if m:
+                fecha_inicio = m.group(1)
+                resto = line[m.end():m.end()+40]
+                m2 = re.match(r'\s*al?\s*(\d{2}/\d{2}/\d{4})', resto, re.IGNORECASE)
+                if m2:
+                    return fecha_inicio + ' al ' + m2.group(1)
+                return fecha_inicio
+        return None
 
     datos['fecha_faena']       = extraer_fecha(r'Faena')
     datos['fecha_produccion']  = extraer_fecha(r'Producci[oo]n')
