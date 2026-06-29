@@ -39,12 +39,15 @@ def generar():
         pdf_bytes   = sanitario_f.read()
         datos_prov  = leer_sanitario_provisorio(pdf_bytes, reporte)
 
-        nombre_plantilla = f'Malasia_{"aereo" if tipo_via == "aereo" else "maritimo"}.docx'
-        plantilla = os.path.join(PLANT_DIR, nombre_plantilla)
-        if not os.path.exists(plantilla):
+        # Buscar plantilla flexible: ignora espacios, tildes, guiones
+        import glob
+        patron_via = 'aereo' if tipo_via == 'aereo' else 'mar'
+        candidatos = glob.glob(os.path.join(PLANT_DIR, f'Malasia*{patron_via}*.docx'))
+        if not candidatos:
             return jsonify({'ok': False, 'errores': [
-                f'Plantilla "{nombre_plantilla}" no encontrada en el servidor.'
+                f'Plantilla para via "{tipo_via}" no encontrada. Archivos disponibles: {os.listdir(PLANT_DIR)}'
             ]}), 500
+        plantilla = candidatos[0]
 
         with open(plantilla, 'rb') as f:
             docx_bytes = f.read()
