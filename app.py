@@ -2,6 +2,7 @@ import os, re, io, zipfile, datetime, tempfile, subprocess
 from flask import Flask, render_template, request, send_file, jsonify
 import openpyxl
 import pytesseract
+import fitz
 from PIL import Image
 
 app = Flask(__name__, template_folder=".")
@@ -24,35 +25,46 @@ def generar():
     try:
         reporte_f   = request.files.get('reporte')
         sanitario_f = request.files.get('sanitario')
+        remito_f    = request.files.get('remito')
         shipment    = request.form.get('shipment_no', '').strip()
         tipo_via    = request.form.get('tipo_via', '').strip()
 
         errores = []
         if not reporte_f:   errores.append("Falta el Reporte DOC (.xlsx)")
         if not sanitario_f: errores.append("Falta el Sanitario Provisorio (PDF)")
+        if not remito_f:    errores.append("Falta el Remito (PDF)")
         if not shipment:    errores.append("Falta el número de Shipment")
         if not tipo_via:    errores.append("Seleccioná la vía (Aéreo o Marítimo)")
         if errores:
             return jsonify({'ok': False, 'errores': errores}), 400
 
-        reporte     = leer_reporte(reporte_f, shipment)
-        pdf_bytes   = sanitario_f.read()
-        datos_prov  = leer_sanitario_provisorio(pdf_bytes, reporte)
+        reporte        = leer_reporte(reporte_f, shipment)
+        datos_remito   = leer_remito(remito_f.read())
+        datos_prov     = leer_sanitario_provisorio(sanitario_f.read())
 
-        # Buscar plantilla flexible: ignora espacios, tildes, guiones
+        # Combinar datos
+        datos = {**datos_remito, **datos_prov}
+        # Enriquecer nombres con inglés del reporte
+        for prod in datos.get('productos', []):
+            cod = prod.get('codigo', '')
+            if cod in reporte.get('descripciones', {}):
+                prod['nombre_en'] = reporte['descripciones'][cod]
+            else:
+                prod['nombre_en'] = buscar_nombre_en(prod.get('nombre_es', ''))
+
         import glob
         patron_via = 'aereo' if tipo_via == 'aereo' else 'mar'
         candidatos = glob.glob(os.path.join(PLANT_DIR, f'Malasia*{patron_via}*.docx'))
         if not candidatos:
             return jsonify({'ok': False, 'errores': [
-                f'Plantilla para via "{tipo_via}" no encontrada. Archivos disponibles: {os.listdir(PLANT_DIR)}'
+                f'Plantilla para via "{tipo_via}" no encontrada. Archivos: {os.listdir(PLANT_DIR)}'
             ]}), 500
         plantilla = candidatos[0]
 
         with open(plantilla, 'rb') as f:
             docx_bytes = f.read()
 
-        resultado, alertas = generar_sanitario(docx_bytes, datos_prov, tipo_via)
+        resultado, alertas = generar_sanitario(docx_bytes, datos, tipo_via)
 
         nombre_archivo = f"Sanitario_Malasia_{tipo_via}_{shipment}.docx"
         resp = send_file(
@@ -116,12 +128,100 @@ def leer_reporte(file, shipment):
 
 
 # ─────────────────────────────────────────────
-# OCR DEL SANITARIO PROVISORIO
+# LEER REMITO (fitz - texto embebido)
+# ─────────────────────────────────────────────
+
+def limpiar_num(s):
+    if not s: return None
+    s = str(s).strip().replace(' ', '')
+    if re.match(r'^\d{1,3}(\.\d{3})+(,\d+)?$', s):
+        s = s.replace('.', '').replace(',', '.')
+    else:
+        s = s.replace(',', '.')
+    try: return f'{float(s):.2f}'
+    except: return s
+
+
+def leer_remito(pdf_bytes):
+    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    texto = ''
+    for page in doc:
+        texto += page.get_text()
+    doc.close()
+
+    datos = {}
+
+    # ── Transporte ──────────────────────────────
+    m_vuelo = re.search(r'Buque/Aerol[ií]nea[:\s]+([A-Z][A-Z\-\d]+)', texto, re.IGNORECASE)
+    if m_vuelo:
+        transport = m_vuelo.group(1).strip()
+        if '-' in transport:
+            partes = transport.split('-')
+            if len(partes) == 2 and re.match(r'[A-Z]{2}\d+', partes[1]):
+                datos['transporte'] = f'VUELO / FLIGHT: {partes[1]}'
+            else:
+                datos['transporte'] = f'VAPOR / VESSEL: {transport}'
+        else:
+            datos['transporte'] = f'VAPOR / VESSEL: {transport}'
+
+    # ── Contenedor ──────────────────────────────
+    m_cont = re.search(r'CONTAINER[:\s]*([A-Z]{4}\d{6,7}-?\d?)', texto, re.IGNORECASE)
+    datos['contenedor'] = m_cont.group(1).strip() if m_cont else None
+
+    # ── Precintos ───────────────────────────────
+    m_ps = re.search(r'P\.S\.[:\s]+([A-Z0-9/]+)', texto)
+    m_pa = re.search(r'P\.A\.[:\s]+([A-Z]{2,3}\d{4,8})', texto)
+    datos['precinto_senasa'] = m_ps.group(1).strip() if m_ps else None
+    datos['precinto_afip']   = m_pa.group(1).strip() if m_pa else None
+
+    # ── Pallets ─────────────────────────────────
+    m_pallets = re.search(r'EN\s+(\d+)\s+PALLETS?', texto, re.IGNORECASE)
+    datos['pallets'] = m_pallets.group(1) if m_pallets else None
+
+    # Peso pallet = tara contenedor o calculado
+    # KGS de pallet viene del provisorio
+
+    # ── Totales ─────────────────────────────────
+    m_tot_cajas = re.search(r'Total General\s+(\d[\d\.]*)\s', texto)
+    m_tot_neto  = re.search(r'PESO NETO TOTAL[:\s]+([\d\.,]+)', texto)
+    m_tot_bruto = re.search(r'PESO BRUTO TOTAL[:\s]+([\d\.,]+)', texto)
+    datos['total_cajas'] = m_tot_cajas.group(1).replace('.','') if m_tot_cajas else None
+    datos['total_neto']  = limpiar_num(m_tot_neto.group(1)) if m_tot_neto else None
+    datos['total_bruto'] = limpiar_num(m_tot_bruto.group(1)) if m_tot_bruto else None
+
+    # ── Productos ───────────────────────────────
+    productos = []
+    # Patrón: CODIGO  DESCRIPCION  CAJAS  UNIDADES  KG.NETOS  KG.BRUTOS
+    patron = re.compile(
+        r'^(CD\d+)\s+(.+?)\s+(\d+)\s+\d+\s+([\d\.,]+)\s+([\d\.,]+)\s*$',
+        re.MULTILINE
+    )
+    for m in patron.finditer(texto):
+        codigo = m.group(1).strip()
+        desc   = m.group(2).strip()
+        cajas  = m.group(3).strip()
+        neto   = limpiar_num(m.group(4))
+        bruto  = limpiar_num(m.group(5))
+        nombre_es = buscar_nombre_es_remito(desc)
+        productos.append({
+            'codigo':    codigo,
+            'nombre_es': nombre_es,
+            'nombre_en': '',
+            'cajas':     cajas,
+            'neto':      neto,
+            'bruto':     bruto,
+        })
+
+    datos['productos'] = productos
+    return datos
+
+
+# ─────────────────────────────────────────────
+# LEER SANITARIO PROVISORIO (OCR - solo fechas y pallets KGS)
 # ─────────────────────────────────────────────
 
 def ocr_pdf(pdf_bytes):
-    """Convierte PDF a texto via pdftoppm + pytesseract, página por página."""
-    texto = ''''''
+    texto = ''
     with tempfile.TemporaryDirectory() as tmpdir:
         pdf_path = os.path.join(tmpdir, 'input.pdf')
         with open(pdf_path, 'wb') as f:
@@ -143,179 +243,47 @@ def ocr_pdf(pdf_bytes):
     return texto
 
 
-def limpiar_num(s):
-    """Normaliza número: '1.438,00' o '1438,00' → '1438.00'"""
-    if not s:
-        return None
-    s = s.strip().replace(' ', '')
-    # formato europeo: punto como miles, coma como decimal
-    if re.match(r'^\d{1,3}(\.\d{3})+(,\d+)?$', s):
-        s = s.replace('.', '').replace(',', '.')
-    else:
-        s = s.replace(',', '.')
-    try:
-        return f'{float(s):.2f}'
-    except Exception:
-        return s
-
-
-def buscar(patron, texto, grupo=1, flags=re.IGNORECASE):
-    m = re.search(patron, texto, flags)
-    return m.group(grupo).strip() if m else None
-
-
-def leer_sanitario_provisorio(pdf_bytes, reporte):
+def leer_sanitario_provisorio(pdf_bytes):
     texto = ocr_pdf(pdf_bytes)
     datos = {}
 
-    # ── Fechas ───────────────────────────────────────────────────
-    # Formato: "Faena: 28/05/2026 al 05/06/2026"
-    # o "Faena: 16/12/2025" (sin rango)
-    def extraer_fecha_campo(etiqueta):
+    # ── Fechas ───────────────────────────────────
+    def extraer_fecha(etiqueta):
         m = re.search(
             rf'{etiqueta}[:\s\-—]+(\d{{2}}/\d{{2}}/\d{{4}}(?:\s+al?\s+\d{{2}}/\d{{2}}/\d{{4}})?)',
             texto, re.IGNORECASE
         )
         if m:
-            return m.group(1).strip()
+            fecha = m.group(1).strip()
+            fecha = re.sub(r'[^0-9/\s].*$', '', fecha).strip()
+            fecha = re.sub(r'\s+al?\s+', ' al ', fecha)
+            return fecha
         return None
 
-    datos['fecha_faena']      = extraer_fecha_campo(r'Faena')
-    datos['fecha_produccion'] = extraer_fecha_campo(r'Producci[oó]n')
-    datos['fecha_vencimiento']= extraer_fecha_campo(r'Vencimiento')
+    datos['fecha_faena']       = extraer_fecha(r'Faena')
+    datos['fecha_produccion']  = extraer_fecha(r'Producci[oó]n')
+    datos['fecha_vencimiento'] = extraer_fecha(r'Vencimiento')
 
-    # Limpiar ruido OCR en fechas
-    for k in ('fecha_faena', 'fecha_produccion', 'fecha_vencimiento'):
-        if datos.get(k):
-            # Eliminar caracteres basura al final
-            datos[k] = re.sub(r'[^0-9/\s].*$', '', datos[k]).strip()
-            datos[k] = re.sub(r'\s+al?\s+', ' al ', datos[k])
+    # ── Pallets KGS ──────────────────────────────
+    m_pallets = re.search(r'EN\s+\d+\s+PALLETS?[:\s]+([\d\.,]+)\s*KGS?', texto, re.IGNORECASE)
+    datos['kg_pallets'] = limpiar_num(m_pallets.group(1)) if m_pallets else None
 
-    # ── Transporte ───────────────────────────────────────────────
-    # Aéreo: "Vuelo de Aerolínea: EMIRATES N°: EK248 de Fecha: 24/01/2026"
-    # Marítimo: "Barco: TIGER PLATA 985"
-    m_vuelo = re.search(
-        r'(?:Vuelo de Aerol[ií]nea|Aerol[ií]nea)[:\s]+([A-Z][A-Z\s]+?)\s*N[°o"*]*[:\s]*([A-Z]{2}\d+)',
-        texto, re.IGNORECASE
-    )
-    m_barco = re.search(
-        r'Barco[:\s]+([A-Z][A-Z\s\d]+?)(?:\n|IV\.|$)',
-        texto, re.IGNORECASE
-    )
-
-    if m_vuelo:
-        aerolinea = m_vuelo.group(1).strip()
-        numero    = m_vuelo.group(2).strip()
-        datos['transporte'] = f'VUELO / FLIGHT: {numero}'
-        datos['tipo_detectado'] = 'aereo'
-    elif m_barco:
-        barco = m_barco.group(1).strip().rstrip('0123456789').strip()
-        datos['transporte'] = f'VAPOR / VESSEL: {barco}'
-        datos['tipo_detectado'] = 'maritimo'
-    else:
-        datos['transporte'] = ''
-        datos['tipo_detectado'] = 'desconocido'
-
-    # ── Contenedor ───────────────────────────────────────────────
-    m_cont = re.search(
-        r'Contenedor N[^:]*:\s*([A-Z]{4}[\+\-]?\d{6,7}[\-\d]*)',
-        texto, re.IGNORECASE
-    )
-    if m_cont:
-        cont = m_cont.group(1).replace('+', '')
-        datos['contenedor'] = cont
-    else:
-        datos['contenedor'] = None
-
-    # ── Precinto A.F.I.P. ────────────────────────────────────────
-    m_afip = re.search(
-        r'A\.F[\w\.]+P[^\:]*[:\"\*\s]+([A-Z]{2,3}\d{4,8})',
-        texto, re.IGNORECASE
-    )
-    datos['precinto_afip'] = m_afip.group(1).strip() if m_afip else None
-
-    # ── Pallets y KGS ────────────────────────────────────────────
-    m_pallets = re.search(
-        r'EN\s+(\d+)\s+PALLETS?[:\s]+([\d\.,]+)\s*KGS?',
-        texto, re.IGNORECASE
-    )
-    if m_pallets:
-        datos['pallets']    = m_pallets.group(1)
-        datos['kg_pallets'] = limpiar_num(m_pallets.group(2))
-    else:
-        datos['pallets']    = None
-        datos['kg_pallets'] = None
-
-    # ── Totales (cajas, neto, bruto) ─────────────────────────────
-    # Los totales suelen aparecer como dos números grandes juntos en el texto
-    # cerca de "Totales" o justo antes de "I.10 Tipo de embalaje"
-    m_totales = re.search(
-        r'(?:Totales?|I\.9)[^\n]*\n[^\n]*?(\d{2,4})\s+([\d\.,]+)\s+([\d\.,]+)',
-        texto, re.IGNORECASE | re.DOTALL
-    )
-    if not m_totales:
-        # Buscar el par neto/bruto total: números grandes consecutivos
-        # que aparecen solos en una zona sin descripción de producto
-        m_totales2 = re.search(
-            r'\n\s*(\d{3,6}[,\.]\d{2})\s+(\d{3,6}[,\.]\d{2})\s*\n',
-            texto
-        )
-        if m_totales2:
-            datos['total_neto']  = limpiar_num(m_totales2.group(1))
-            datos['total_bruto'] = limpiar_num(m_totales2.group(2))
-            datos['total_cajas'] = None  # se calculará desde productos
-        else:
-            datos['total_neto']  = None
-            datos['total_bruto'] = None
-            datos['total_cajas'] = None
-    else:
-        datos['total_cajas'] = m_totales.group(1)
-        datos['total_neto']  = limpiar_num(m_totales.group(2))
-        datos['total_bruto'] = limpiar_num(m_totales.group(3))
-
-    # ── Fecha de emisión ─────────────────────────────────────────
+    # ── Fecha de emisión ─────────────────────────
     datos['fecha_emision'] = datetime.datetime.now().strftime('%d/%m/%Y')
-
-    # ── Productos ────────────────────────────────────────────────
-    datos['productos'] = extraer_productos(texto, reporte)
-
-    # Si no hay totales, calcular desde productos
-    if not datos['total_cajas'] and datos['productos']:
-        datos['total_cajas'] = str(sum(
-            int(p.get('cajas') or 0) for p in datos['productos']
-        ))
-    if not datos['total_neto'] and datos['productos']:
-        total = sum(float(p.get('neto') or 0) for p in datos['productos'])
-        datos['total_neto'] = f'{total:.2f}'
-    if not datos['total_bruto'] and datos['productos']:
-        total = sum(float(p.get('bruto') or 0) for p in datos['productos'])
-        datos['total_bruto'] = f'{total:.2f}'
 
     return datos
 
 
 # ─────────────────────────────────────────────
-# EXTRACCIÓN DE PRODUCTOS DEL TEXTO OCR
+# MAPAS NOMBRE
 # ─────────────────────────────────────────────
 
-# Nombres clave en español que identifican un producto
-NOMBRES_PRODUCTO = [
-    'BOLA DE LOMO', 'CUADRADA', 'NALGA DE ADENTRO CON TAPA', 'NALGA CON TAPA',
-    'NALGA SIN TAPA', 'NALGA', 'CARNAZA DE PALETA', 'BIFE ANGOSTO',
-    'BIFE ANCHO SIN TAPA', 'BIFE ANCHO', 'BIFE DE VACIO GRANDE', 'BIFE DE VACIO',
-    'COLITA DE CUADRIL', 'CORAZON DE CUADRIL', 'CORAZON DE PALETA',
-    'LOMO SIN CORDON', 'LOMO S/ CORDON',
-    'MARUCHA', 'ASADO SIN HUESO', 'PECHO', 'TAPA DE BIFE ANCHO',
-    'TAPA DE CUADRIL', 'PECETO', 'AGUJA', 'CHINGOLO', 'PALETA',
-    'CARNAZA', 'VACIO', 'ENTRAÑA',
-]
-
-# Mapa español → inglés para Malasia
 MAPA_EN = {
     'BOLA DE LOMO':              'KNUCKLE',
     'CUADRADA':                  'OUTSIDE FLAT',
     'LOMO SIN CORDON':           'TENDERLOIN CHAIN OFF',
     'LOMO S/ CORDON':            'TENDERLOIN CHAIN OFF',
+    'LOMO SC':                   'TENDERLOIN CHAIN OFF',
     'NALGA DE ADENTRO CON TAPA': 'TOPSIDE CAP ON',
     'NALGA CON TAPA':            'TOPSIDE CAP ON',
     'NALGA SIN TAPA':            'TOPSIDE CAP OFF',
@@ -323,6 +291,7 @@ MAPA_EN = {
     'CARNAZA DE PALETA':         'BOLAR BLADE',
     'BIFE ANGOSTO':              'STRIPLOIN',
     'BIFE ANCHO SIN TAPA':       'RIBEYE',
+    'BIFE ANCHO ST':             'RIBEYE',
     'BIFE ANCHO':                'RIB EYE',
     'COLITA DE CUADRIL':         'TRI-TIP',
     'CORAZON DE CUADRIL':        'HEART OF RUMP',
@@ -339,34 +308,24 @@ MAPA_EN = {
     'CORAZON DE PALETA':         'SHOULDER CLOD HEART',
 }
 
+NOMBRES_PRODUCTO = sorted(MAPA_EN.keys(), key=len, reverse=True)
 
-def buscar_nombre_es(texto_linea):
-    """Extrae el nombre corto en español de una línea de descripción SENASA."""
-    t = texto_linea.upper()
-    # Ordenar por longitud desc para matchear primero los más específicos
-    for nombre in sorted(NOMBRES_PRODUCTO, key=len, reverse=True):
-        if nombre in t:
-            # Si tiene info de LBS, agregarla
-            lbs_m = re.search(r'(\d/\d\s*LBS|\+\s*\d\s*LBS)', texto_linea, re.IGNORECASE)
+
+def buscar_nombre_es_remito(desc):
+    """Extrae nombre corto en español de la descripción del remito."""
+    d = desc.upper()
+    for nombre in NOMBRES_PRODUCTO:
+        if nombre in d:
+            lbs_m = re.search(r'(\d/\d\s*LBS|\+\s*\d\s*LBS|\+5\s*LBS)', desc, re.IGNORECASE)
             if lbs_m and 'LOMO' in nombre:
                 return f'{nombre} {lbs_m.group(1).strip()}'
             return nombre
-    return None
+    return desc
 
 
-def buscar_nombre_en(nombre_es, descripciones_reporte=None):
-    """Busca la traducción al inglés."""
+def buscar_nombre_en(nombre_es):
     n = nombre_es.upper()
-
-    # Intentar desde reporte DOC primero
-    if descripciones_reporte:
-        for code, desc in descripciones_reporte.items():
-            for clave in MAPA_EN:
-                if clave in n and clave.split()[0] in desc.upper():
-                    return desc
-
-    # Fallback al mapa interno (más específico primero)
-    for clave, en in sorted(MAPA_EN.items(), key=lambda x: len(x[0]), reverse=True):
+    for clave, en in MAPA_EN.items():
         if clave in n:
             return en
     return ''
@@ -378,71 +337,6 @@ def armar_nombre_bilingue(nombre_es, nombre_en):
     if en and en != es:
         return f'{es}/ {en}'
     return es
-
-
-def extraer_productos(texto, reporte):
-    """
-    Extrae los productos del texto OCR del sanitario provisorio.
-    Estrategia: buscar líneas que contengan nombres conocidos de productos
-    y los números de neto/bruto al final o en la misma línea.
-    """
-    descripciones = reporte.get('descripciones', {})
-    productos = []
-    lineas = texto.split('\n')
-
-    i = 0
-    while i < len(lineas):
-        linea = lineas[i]
-        nombre_es = buscar_nombre_es(linea)
-        if nombre_es:
-            # Buscar cajas: número al inicio de la línea anterior o esta
-            cajas = None
-            # Buscar número de cajas en la línea anterior (suele estar ahí)
-            if i > 0:
-                m_cajas = re.match(r'^\s*(\d{1,4})\s*$', lineas[i-1].strip())
-                if m_cajas:
-                    cajas = m_cajas.group(1)
-            # Si no, buscar al inicio de la línea actual
-            if not cajas:
-                m_cajas = re.match(r'^\s*(\d{1,4})\s+', linea)
-                if m_cajas:
-                    cajas = m_cajas.group(1)
-
-            # Buscar neto y bruto: dos números con decimales en la línea o siguientes
-            neto = bruto = None
-            # Buscar en la línea actual
-            nums = re.findall(r'\b(\d{1,6}[,\.]\d{2})\b', linea)
-            if len(nums) >= 2:
-                neto  = limpiar_num(nums[-2])
-                bruto = limpiar_num(nums[-1])
-            elif len(nums) == 1:
-                # Un número en esta línea, buscar el otro en la siguiente
-                neto = limpiar_num(nums[0])
-                if i + 1 < len(lineas):
-                    nums2 = re.findall(r'\b(\d{1,6}[,\.]\d{2})\b', lineas[i+1])
-                    if nums2:
-                        bruto = limpiar_num(nums2[0])
-            else:
-                # Buscar en línea siguiente
-                if i + 1 < len(lineas):
-                    nums2 = re.findall(r'\b(\d{1,6}[,\.]\d{2})\b', lineas[i+1])
-                    if len(nums2) >= 2:
-                        neto  = limpiar_num(nums2[0])
-                        bruto = limpiar_num(nums2[1])
-
-            nombre_en = buscar_nombre_en(nombre_es, descripciones)
-
-            if neto:  # solo agregar si tiene al menos el neto
-                productos.append({
-                    'cajas':    cajas or '1',
-                    'nombre_es': nombre_es,
-                    'nombre_en': nombre_en,
-                    'neto':     neto,
-                    'bruto':    bruto or neto,
-                })
-        i += 1
-
-    return productos
 
 
 # ─────────────────────────────────────────────
@@ -497,7 +391,7 @@ def _construir_fila_maritimo(fila_modelo, cajas, nombre_bi, neto, bruto):
 
 def _reemplazar_bloque_productos(xml, trs, primera_idx, total_idx, productos,
                                   total_cajas, total_neto, total_bruto, tipo_via):
-    fila_modelo, ini_mod, _   = get_fila_xml(xml, trs, primera_idx)
+    fila_modelo, ini_mod, _      = get_fila_xml(xml, trs, primera_idx)
     fila_total,  ini_tot, fin_tot = get_fila_xml(xml, trs, total_idx)
 
     nuevas_filas = ''
@@ -550,10 +444,10 @@ def generar_sanitario(docx_bytes, datos, tipo_via):
 
 def _gen_aereo(xml, datos):
     alertas = []
-    productos    = datos.get('productos', [])
-    total_cajas  = datos.get('total_cajas', '18')
-    total_neto   = datos.get('total_neto',  '285.00')
-    total_bruto  = datos.get('total_bruto', '340.00')
+    productos   = datos.get('productos', [])
+    total_cajas = datos.get('total_cajas', '')
+    total_neto  = datos.get('total_neto', '')
+    total_bruto = datos.get('total_bruto', '')
 
     trs = get_trs(xml)
     xml = _reemplazar_bloque_productos(
@@ -585,7 +479,7 @@ def _gen_aereo(xml, datos):
     if transporte:
         xml = xml.replace('>VUELO / FLIGHT: EK248<', f'>{transporte}<')
 
-    # Fecha de emisión: año | mes | día
+    # Fecha emisión
     fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
     try:
         dia, mes, anio = fecha_emi.split('/')
@@ -602,10 +496,10 @@ def _gen_aereo(xml, datos):
 
 def _gen_maritimo(xml, datos):
     alertas = []
-    productos    = datos.get('productos', [])
-    total_cajas  = datos.get('total_cajas', '613')
-    total_neto   = datos.get('total_neto',  '11895.00')
-    total_bruto  = datos.get('total_bruto', '12655.34')
+    productos   = datos.get('productos', [])
+    total_cajas = datos.get('total_cajas', '')
+    total_neto  = datos.get('total_neto', '')
+    total_bruto = datos.get('total_bruto', '')
 
     trs = get_trs(xml)
     xml = _reemplazar_bloque_productos(
@@ -645,7 +539,7 @@ def _gen_maritimo(xml, datos):
     if not contenedor:    alertas.append('Contenedor no encontrado — completar manualmente')
     if not precinto_afip: alertas.append('Precinto A.F.I.P. no encontrado — completar manualmente')
 
-    # Fecha de emisión
+    # Fecha emisión
     fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
     try:
         dia, mes, anio = fecha_emi.split('/')
