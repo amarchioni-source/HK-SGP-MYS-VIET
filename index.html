@@ -205,9 +205,20 @@
     </div>
 
     <div class="form-group">
+      <label>Piqueo <span class="badge badge-xlsx">XLSX</span></label>
+      <span class="hint">Ej: PIQUEO_9500_PEDIDO_213593.xlsx</span>
+      <div class="file-drop">
+        <input type="file" name="piqueo" accept=".xlsx" onchange="mostrarNombre(this,'nombre-piqueo')"/>
+        <div class="icon">📋</div>
+        <div class="label"><strong>Clic para elegir</strong> o arrastrar aquí</div>
+        <div class="filename" id="nombre-piqueo"></div>
+      </div>
+    </div>
+
+    <div class="form-group">
       <label>
         Sanitario Provisorio
-        <span class="ocr-badge">⚡ OCR fechas</span>
+        <span class="ocr-badge">⚡ OCR pallets</span>
         <span class="badge badge-pdf">PDF</span>
       </label>
       <span class="hint">PDF escaneado del certificado SENASA provisorio</span>
@@ -224,7 +235,7 @@
       <span class="hint">Ej: RTO_1894.pdf</span>
       <div class="file-drop">
         <input type="file" name="remito" accept=".pdf" onchange="mostrarNombre(this,'nombre-remito')"/>
-        <div class="icon">📋</div>
+        <div class="icon">🧾</div>
         <div class="label"><strong>Clic para elegir</strong> o arrastrar aquí</div>
         <div class="filename" id="nombre-remito"></div>
       </div>
@@ -251,8 +262,8 @@
 
   <hr class="divider"/>
   <div class="instrucciones">
-    <strong>Cómo usar:</strong> subí el sanitario provisorio (fechas), el remito (productos y kg),
-    el Reporte DOC (nombres en inglés), ingresá el shipment y elegí la vía.
+    <strong>Cómo usar:</strong> subí el piqueo (fechas), el sanitario provisorio (pallets),
+    el remito (productos y kg), el Reporte DOC (nombres en inglés), ingresá el shipment y elegí la vía.
   </div>
 </div>
 
@@ -281,14 +292,15 @@
     const spinner = document.getElementById('spinner');
     const box     = document.getElementById('result-box');
 
-    const shipment = document.getElementById('shipment_no').value.trim();
-    const tipo_via = document.querySelector('input[name="tipo_via"]:checked')?.value || '';
+    const shipment  = document.getElementById('shipment_no').value.trim();
+    const tipo_via  = document.querySelector('input[name="tipo_via"]:checked')?.value || '';
+    const piqueo    = this.piqueo.files[0];
     const sanitario = this.sanitario.files[0];
     const remito    = this.remito.files[0];
     const reporte   = this.reporte.files[0];
 
-    if (!shipment || !tipo_via || !sanitario || !remito || !reporte) {
-      mostrarError(['Completá todos los campos y subí los 3 archivos.']);
+    if (!shipment || !tipo_via || !piqueo || !sanitario || !remito || !reporte) {
+      mostrarError(['Completá todos los campos y subí los 4 archivos.']);
       return;
     }
 
