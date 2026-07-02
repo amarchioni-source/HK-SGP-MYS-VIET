@@ -516,23 +516,79 @@ def generar_sanitario(docx_bytes, datos, tipo_via, destino):
 
 
 def _reemplazar_fechas(xml, trs, f_faena, f_prod, f_venc, fmt_func):
-    """Busca la fila que contiene I.13/I.14/I.15 y reemplaza las fechas dinamicamente."""
+    """Busca filas con I.13/I.14/I.15 y reemplaza fechas aunque esten fragmentadas en w:t."""
+    # Las fechas pueden estar en 1 fila o en filas separadas
+    # y pueden estar fragmentadas en multiples <w:t>
+    # Estrategia: reconstruir el texto de cada fila, encontrar las celdas de fecha,
+    # y reemplazar el bloque XML de cada celda completa
+
+    def _texto_fila(fila):
+        return ''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', fila))
+
+    def _get_celdas(fila):
+        starts = [m.start() for m in re.finditer(r'<w:tc>', fila)]
+        ends   = [m.start() for m in re.finditer(r'</w:tc>', fila)]
+        return [(s, e) for s, e in zip(starts, ends)]
+
+    def _texto_celda(fila, cs, ce):
+        return ''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', fila[cs:ce]))
+
+    def _reemplazar_celda_fecha(fila, cs, ce, nuevo):
+        bloque = fila[cs:ce]
+        # Poner todo el texto en el primer w:t y vaciar el resto
+        wts = list(re.finditer(r'<w:t[^>]*>[^<]*</w:t>', bloque))
+        if not wts:
+            return fila
+        nuevo_bloque = bloque
+        # Vaciar todos
+        for wt in wts:
+            tag = re.match(r'<w:t[^>]*>', wt.group()).group()
+            nuevo_bloque = nuevo_bloque.replace(wt.group(), tag + '</w:t>', 1)
+        # Poner nuevo valor en el primero
+        primer = list(re.finditer(r'<w:t[^>]*></w:t>', nuevo_bloque))[0]
+        tag = re.match(r'<w:t[^>]*>', primer.group()).group()
+        # Necesitamos xml:space preserve para espacios
+        tag_preserve = '<w:t xml:space="preserve">'
+        nuevo_bloque = nuevo_bloque[:primer.start()] + tag_preserve + nuevo + '</w:t>' + nuevo_bloque[primer.end():]
+        return fila[:cs] + nuevo_bloque + fila[ce:]
+
+    fechas_a_reemplazar = [
+        (f_faena, fmt_func),
+        (f_prod,  fmt_func),
+        (f_venc,  fmt_func),
+    ]
+    fecha_idx = 0
+
     for i, m in enumerate(trs):
+        if fecha_idx >= 3:
+            break
         ini = m.start()
         fin = trs[i+1].start() if i+1 < len(trs) else len(xml)
         fila = xml[ini:fin]
-        if 'I.13' in fila and 'I.14' in fila and 'I.15' in fila:
-            # Encontrar los 3 valores de fecha en la fila
-            fechas = re.findall(r'<w:t[^>]*>(\d{2}/\d{2}/\d{4}[^<]*)</w:t>', fila)
-            nueva_fila = fila
-            if len(fechas) >= 1 and f_faena:
-                nueva_fila = nueva_fila.replace('>' + fechas[0] + '<', '>' + fmt_func(f_faena) + '<', 1)
-            if len(fechas) >= 2 and f_prod:
-                nueva_fila = nueva_fila.replace('>' + fechas[1] + '<', '>' + fmt_func(f_prod) + '<', 1)
-            if len(fechas) >= 3 and f_venc:
-                nueva_fila = nueva_fila.replace('>' + fechas[2] + '<', '>' + fmt_func(f_venc) + '<', 1)
-            xml = xml[:ini] + nueva_fila + xml[fin:]
-            break
+
+        if not ('I.13' in fila or 'I.14' in fila or 'I.15' in fila):
+            continue
+
+        celdas = _get_celdas(fila)
+        nueva_fila = fila
+        offset = 0
+
+        for cs, ce in celdas:
+            if fecha_idx >= 3:
+                break
+            txt = _texto_celda(nueva_fila, cs + offset, ce + offset)
+            # Detectar si la celda contiene una fecha (con posible fragmentacion)
+            txt_limpio = txt.strip()
+            if re.search(r'\d{2}/\d{2}/\d{4}', txt_limpio):
+                f_nueva, fmt = fechas_a_reemplazar[fecha_idx]
+                if f_nueva:
+                    fila_antes = nueva_fila
+                    nueva_fila = _reemplazar_celda_fecha(nueva_fila, cs + offset, ce + offset, fmt(f_nueva))
+                    offset += len(nueva_fila) - len(fila_antes)
+                fecha_idx += 1
+
+        xml = xml[:ini] + nueva_fila + xml[fin:]
+
     return xml
 
 # ── MALASIA AÉREO ────────────────────────────────────────────────────────────
