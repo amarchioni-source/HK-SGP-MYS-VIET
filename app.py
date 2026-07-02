@@ -25,6 +25,7 @@ def generar():
         remito_f    = request.files.get('remito')
         shipment    = request.form.get('shipment_no', '').strip()
         tipo_via    = request.form.get('tipo_via', '').strip()
+        destino     = request.form.get('destino', 'malasia').strip()
 
         errores = []
         if not piqueo_f:    errores.append('Falta el Piqueo (.xlsx)')
@@ -41,8 +42,8 @@ def generar():
         datos_remito = leer_remito(remito_f.read())
         datos_prov   = leer_sanitario_provisorio(sanitario_f.read())
 
-        # Combinar: remito base, fechas del piqueo, pallets del provisorio
         datos = {**datos_remito, **datos_piqueo, **datos_prov}
+        datos['destino'] = destino
         for prod in datos.get('productos', []):
             cod = prod.get('codigo', '')
             if cod in reporte.get('descripciones', {}):
@@ -52,19 +53,22 @@ def generar():
 
         import glob
         patron_via = 'aereo' if tipo_via == 'aereo' else 'mar'
-        candidatos = glob.glob(os.path.join(PLANT_DIR, 'Malasia*' + patron_via + '*.docx'))
+        patron_dest = 'ingapur' if destino == 'singapur' else 'alasia'
+        candidatos = glob.glob(os.path.join(PLANT_DIR, '*' + patron_dest + '*' + patron_via + '*.docx'))
+        if not candidatos:
+            candidatos = glob.glob(os.path.join(PLANT_DIR, '*' + patron_dest + '*.docx'))
         if not candidatos:
             return jsonify({'ok': False, 'errores': [
-                'Plantilla para via "' + tipo_via + '" no encontrada. Archivos: ' + str(os.listdir(PLANT_DIR))
+                'Plantilla no encontrada para destino=' + destino + ' via=' + tipo_via + '. Archivos: ' + str(os.listdir(PLANT_DIR))
             ]}), 500
         plantilla = candidatos[0]
 
         with open(plantilla, 'rb') as f:
             docx_bytes = f.read()
 
-        resultado, alertas = generar_sanitario(docx_bytes, datos, tipo_via)
+        resultado, alertas = generar_sanitario(docx_bytes, datos, tipo_via, destino)
 
-        nombre_archivo = 'Sanitario_Malasia_' + tipo_via + '_' + shipment + '.docx'
+        nombre_archivo = 'Sanitario_' + destino.capitalize() + '_' + tipo_via + '_' + shipment + '.docx'
         resp = send_file(
             io.BytesIO(resultado), as_attachment=True,
             download_name=nombre_archivo,
@@ -79,23 +83,20 @@ def generar():
         return jsonify({'ok': False, 'errores': [str(e), traceback.format_exc()]}), 500
 
 
-# ── PIQUEO (xlsx) - fechas ────────────────────────────────────────────────────
+# ── PIQUEO ───────────────────────────────────────────────────────────────────
 
 def leer_piqueo(file):
     wb = openpyxl.load_workbook(file)
     ws = wb.active
-
     faena_min = faena_max = None
     prod_min  = prod_max  = None
     venc_min  = venc_max  = None
-
     for row in ws.iter_rows(min_row=2, values_only=True):
         if not row or not row[1]:
             continue
-        fecha_f   = row[7]   # col H = Fecha F (faena)
-        fecha_p   = row[6]   # col G = Fecha P (produccion)
-        fecha_ven = row[10]  # col K = Fecha Ven (vencimiento)
-
+        fecha_f   = row[7]
+        fecha_p   = row[6]
+        fecha_ven = row[10]
         if isinstance(fecha_f, datetime.datetime):
             faena_min = min(faena_min, fecha_f) if faena_min else fecha_f
             faena_max = max(faena_max, fecha_f) if faena_max else fecha_f
@@ -105,15 +106,12 @@ def leer_piqueo(file):
         if isinstance(fecha_ven, datetime.datetime):
             venc_min = min(venc_min, fecha_ven) if venc_min else fecha_ven
             venc_max = max(venc_max, fecha_ven) if venc_max else fecha_ven
-
     def fmt_rango(d_min, d_max):
-        if not d_min:
-            return None
+        if not d_min: return None
         s = d_min.strftime('%d/%m/%Y')
         if d_max and d_max != d_min:
             s += ' al ' + d_max.strftime('%d/%m/%Y')
         return s
-
     return {
         'fecha_faena':       fmt_rango(faena_min, faena_max),
         'fecha_produccion':  fmt_rango(prod_min,  prod_max),
@@ -121,27 +119,22 @@ def leer_piqueo(file):
     }
 
 
-# ── REPORTE DOC (xlsx) ────────────────────────────────────────────────────────
+# ── REPORTE DOC ──────────────────────────────────────────────────────────────
 
 def leer_reporte(file, shipment):
     wb = openpyxl.load_workbook(file)
     ws = wb.active
     rows = list(ws.iter_rows(values_only=True))
-    if not rows:
-        return {}
+    if not rows: return {}
     hdr = None
     hdr_idx = 0
     for i, row in enumerate(rows[:5]):
         if row and any(str(v or '').strip() in ('Shipment No', 'Shipment') for v in row):
-            hdr = row
-            hdr_idx = i
-            break
-    if hdr is None:
-        hdr = rows[0]
+            hdr = row; hdr_idx = i; break
+    if hdr is None: hdr = rows[0]
     def col(keys):
         for i, h in enumerate(hdr):
-            if h and any(k.lower() in str(h).lower() for k in keys):
-                return i
+            if h and any(k.lower() in str(h).lower() for k in keys): return i
         return None
     c_ship = col(['Shipment No', 'Shipment'])
     c_code = col(['Code'])
@@ -149,38 +142,30 @@ def leer_reporte(file, shipment):
     d = {'descripciones': {}}
     ship_base = shipment.split('-')[0]
     for row in rows[hdr_idx + 1:]:
-        if not row or c_ship is None:
-            continue
+        if not row or c_ship is None: continue
         sv = str(row[c_ship] or '').strip()
-        if sv != shipment and not sv.startswith(ship_base):
-            continue
+        if sv != shipment and not sv.startswith(ship_base): continue
         if c_code is not None and c_desc is not None and row[c_code] and row[c_desc]:
             d['descripciones'][str(row[c_code]).strip()] = str(row[c_desc]).strip()
     return d
 
 
-# ── UTILIDADES NUMÉRICAS ──────────────────────────────────────────────────────
+# ── UTILIDADES NUMÉRICAS ─────────────────────────────────────────────────────
 
 def limpiar_num(s):
-    if not s:
-        return None
+    if not s: return None
     s = str(s).strip().replace(' ', '')
-    if not s:
-        return None
-    # Primero: N.3decimales remito Devesa: 320.000->320, 343.890->343.89
+    if not s: return None
     if re.match(r'^\d+\.\d{3}$', s):
         entero, dec = s.split('.')
         dec_limpio = dec.rstrip('0')
         s = entero + '.' + dec_limpio if dec_limpio else entero
-    # Segundo: europeo miles+coma: 10.020,000
     elif ',' in s and re.match(r'^\d{1,3}(\.\d{3})+(,\d+)?$', s):
         s = s.replace('.', '').replace(',', '.')
     else:
         s = s.replace(',', '.')
-    try:
-        return '{:.2f}'.format(float(s))
-    except Exception:
-        return s
+    try: return '{:.2f}'.format(float(s))
+    except Exception: return s
 
 
 # ── REMITO (fitz) ────────────────────────────────────────────────────────────
@@ -188,8 +173,7 @@ def limpiar_num(s):
 def leer_remito(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype='pdf')
     texto = ''
-    for page in doc:
-        texto += page.get_text()
+    for page in doc: texto += page.get_text()
     doc.close()
     datos = {}
     m_vuelo = re.search(r'Buque/Aerol[ii]nea[:\s]+([A-Z][A-Z\-\d]+)', texto, re.IGNORECASE)
@@ -198,11 +182,14 @@ def leer_remito(pdf_bytes):
         if '-' in transport:
             partes = transport.split('-')
             if len(partes) == 2 and re.match(r'[A-Z]{2}\d+', partes[1]):
-                datos['transporte'] = 'VUELO / FLIGHT: ' + partes[1]
+                datos['transporte'] = partes[1]
+                datos['tipo_transporte'] = 'aereo'
             else:
-                datos['transporte'] = 'VAPOR / VESSEL: ' + transport
+                datos['transporte'] = transport
+                datos['tipo_transporte'] = 'maritimo'
         else:
-            datos['transporte'] = 'VAPOR / VESSEL: ' + transport
+            datos['transporte'] = transport
+            datos['tipo_transporte'] = 'maritimo'
     m_cont = re.search(r'CONTAINER[:\s]*([A-Z]{4}\d{6,7}-?\d?)', texto, re.IGNORECASE)
     datos['contenedor'] = m_cont.group(1).strip() if m_cont else None
     m_ps = re.search(r'P\.S\.[:\s]+([A-Z0-9/]+)', texto)
@@ -230,12 +217,8 @@ def leer_remito(pdf_bytes):
             bruto_raw = lineas[i+5].strip() if i+5 < len(lineas) else ''
             nombre_es = buscar_nombre_es_remito(desc)
             productos.append({
-                'codigo':    codigo,
-                'nombre_es': nombre_es,
-                'nombre_en': '',
-                'cajas':     cajas,
-                'neto':      limpiar_num(neto_raw),
-                'bruto':     limpiar_num(bruto_raw),
+                'codigo': codigo, 'nombre_es': nombre_es, 'nombre_en': '',
+                'cajas': cajas, 'neto': limpiar_num(neto_raw), 'bruto': limpiar_num(bruto_raw),
             })
             i += 6
         else:
@@ -244,40 +227,38 @@ def leer_remito(pdf_bytes):
     return datos
 
 
-# ── SANITARIO PROVISORIO (OCR - solo pallets y KGS) ──────────────────────────
+# ── SANITARIO PROVISORIO (OCR) ───────────────────────────────────────────────
 
 def ocr_pdf(pdf_bytes):
     texto = ''
     with tempfile.TemporaryDirectory() as tmpdir:
         pdf_path = os.path.join(tmpdir, 'input.pdf')
-        with open(pdf_path, 'wb') as f:
-            f.write(pdf_bytes)
+        with open(pdf_path, 'wb') as f: f.write(pdf_bytes)
         out_prefix = os.path.join(tmpdir, 'page')
-        subprocess.run(
-            ['pdftoppm', '-r', '150', '-l', '1', '-jpeg', pdf_path, out_prefix],
-            check=True, capture_output=True
-        )
+        subprocess.run(['pdftoppm', '-r', '150', '-l', '1', '-jpeg', pdf_path, out_prefix],
+            check=True, capture_output=True)
         archivos = sorted([f for f in os.listdir(tmpdir) if f.startswith('page') and f.endswith('.jpg')])
         for nombre in archivos:
-            img_path = os.path.join(tmpdir, nombre)
-            img = Image.open(img_path)
+            img = Image.open(os.path.join(tmpdir, nombre))
             texto += pytesseract.image_to_string(img, lang='spa') + '\n'
             img.close()
     return texto
 
 
 def leer_sanitario_provisorio(pdf_bytes):
-    # Solo extraemos pallets y KGS del provisorio via OCR
-    # Las fechas vienen del piqueo
     texto = ocr_pdf(pdf_bytes)
     datos = {}
-    # Pallets: 'ACONDICIONADA EN 14 PALLETS: 614.02KGS'
     m_kg = re.search(r'EN\s+(\d+)\s+PALLETS?[:\s]+(\d[\d\.]*)', texto, re.IGNORECASE)
     if m_kg:
-        datos['pallets_prov']  = m_kg.group(1)   # solo como respaldo
-        datos['kg_pallets']    = limpiar_num(m_kg.group(2))
+        datos['pallets_prov'] = m_kg.group(1)
+        datos['kg_pallets']   = limpiar_num(m_kg.group(2))
     else:
         datos['kg_pallets'] = None
+    # Detectar congelado vs enfriado
+    if re.search(r'CONGELAD', texto, re.IGNORECASE):
+        datos['es_congelado'] = True
+    else:
+        datos['es_congelado'] = False
     datos['fecha_emision'] = datetime.datetime.now().strftime('%d/%m/%Y')
     return datos
 
@@ -312,6 +293,12 @@ MAPA_EN = {
     'AGUJA':                     'CHUCK',
     'CHINGOLO':                  'CHUCK TENDER',
     'CORAZON DE PALETA':         'SHOULDER CLOD HEART',
+    'BRAZUELO':                  'CONICAL MUSCLE',
+    'COGOTE':                    'NECK',
+    'PECHO PEDO':                'BRISKET POINT END',
+    'CABEZA DE LOMO':            'TENDERLOIN BUTT',
+    'BIFE ANGOSTO CON HUESO':    'SHORTLOIN',
+    'CARNAZA':                   'BOLAR BLADE',
 }
 
 NOMBRES_PRODUCTO = sorted(MAPA_EN.keys(), key=len, reverse=True)
@@ -331,20 +318,18 @@ def buscar_nombre_es_remito(desc):
 def buscar_nombre_en(nombre_es):
     n = nombre_es.upper()
     for clave, en in sorted(MAPA_EN.items(), key=lambda x: len(x[0]), reverse=True):
-        if clave in n:
-            return en
+        if clave in n: return en
     return ''
 
 
 def armar_nombre_bilingue(nombre_es, nombre_en):
     es = nombre_es.strip().upper()
     en = (nombre_en or '').strip().upper()
-    if en and en != es:
-        return es + '/ ' + en
+    if en and en != es: return es + '/ ' + en
     return es
 
 
-# ── GENERACION DOCX ──────────────────────────────────────────────────────────
+# ── XML HELPERS ──────────────────────────────────────────────────────────────
 
 def get_trs(xml):
     return list(re.finditer(r'<w:tr[ >]', xml))
@@ -359,12 +344,10 @@ def get_fila_xml(xml, trs, idx):
 def _reemplazar_celda(xml_fila, celda_idx, nuevo_texto):
     celda_starts = [m.start() for m in re.finditer(r'<w:tc>', xml_fila)]
     celda_ends   = [m.start() for m in re.finditer(r'</w:tc>', xml_fila)]
-    if celda_idx >= len(celda_starts):
-        return xml_fila
+    if celda_idx >= len(celda_starts): return xml_fila
     bloque = xml_fila[celda_starts[celda_idx]:celda_ends[celda_idx]]
     textos = re.findall(r'<w:t[^>]*>[^<]*</w:t>', bloque)
-    if not textos:
-        return xml_fila
+    if not textos: return xml_fila
     primer   = textos[0]
     tag_open = re.match(r'<w:t[^>]*>', primer).group()
     nuevo_bloque = bloque.replace(primer, tag_open + nuevo_texto + '</w:t>', 1)
@@ -374,12 +357,12 @@ def _reemplazar_celda(xml_fila, celda_idx, nuevo_texto):
     return xml_fila[:celda_starts[celda_idx]] + nuevo_bloque + xml_fila[celda_ends[celda_idx]:]
 
 
-def _construir_fila(fila_modelo, cajas, nombre_bi, neto, bruto):
+def _construir_fila(fila_modelo, cajas, nombre_bi, neto, bruto, neto_celda, bruto_celda):
     nueva = fila_modelo
     nueva = _reemplazar_celda(nueva, 0, str(cajas))
     nueva = _reemplazar_celda(nueva, 1, nombre_bi)
-    nueva = _reemplazar_celda(nueva, 6, str(neto))
-    nueva = _reemplazar_celda(nueva, 7, str(bruto))
+    nueva = _reemplazar_celda(nueva, neto_celda, str(neto))
+    nueva = _reemplazar_celda(nueva, bruto_celda, str(bruto))
     return nueva
 
 
@@ -393,19 +376,24 @@ def _get_fila_por_contenido(xml, trs, texto_clave):
 
 
 def _reemplazar_pallets_en_fila(fila_xml, pallets, kg_pallets):
-    # Reemplazar numero en texto largo: 'ACONDICIONADO EN 1 PALLET'
-    fila_xml = re.sub(r'(ACONDICIONADO EN )\d+( PALLET)', r'\g<1>' + str(pallets) + r'\2', fila_xml)
-    fila_xml = re.sub(r'(ACONDITIONED IN )\d+( PALLET)', r'\g<1>' + str(pallets) + r'\2', fila_xml)
-    # Reemplazar el <w:t>1</w:t> separado (sin atributos, es el numero de pallets)
-    fila_xml = fila_xml.replace('<w:t>1</w:t>', '<w:t>' + str(pallets) + '</w:t>', 1)
-    # Reemplazar kg pallets (32.44)
+    fila_xml = re.sub(r'(ACONDICIONADO EN\s*)\d+(\s*PALLET)', r'\g<1>' + str(pallets) + r'\2', fila_xml)
+    fila_xml = re.sub(r'(ACONDITIONED IN\s*)\d+(\s*PALLET)', r'\g<1>' + str(pallets) + r'\2', fila_xml)
+    fila_xml = fila_xml.replace('<w:t>' + str(pallets) + '</w:t>', '<w:t>' + str(pallets) + '</w:t>', 1)
+    # Reemplazar numero separado - buscar w:t con solo digitos pequeños
+    for viejo in ['<w:t>1</w:t>', '<w:t>4</w:t>', '<w:t>14</w:t>', '<w:t>19</w:t>', '<w:t>20</w:t>']:
+        if viejo in fila_xml:
+            fila_xml = fila_xml.replace(viejo, '<w:t>' + str(pallets) + '</w:t>', 1)
+            break
     if kg_pallets:
         fila_xml = fila_xml.replace('<w:t>32.44</w:t>', '<w:t>' + str(kg_pallets) + '</w:t>')
+        fila_xml = fila_xml.replace('<w:t>151.77</w:t>', '<w:t>' + str(kg_pallets) + '</w:t>')
+        fila_xml = fila_xml.replace('<w:t>664.35</w:t>', '<w:t>' + str(kg_pallets) + '</w:t>')
     return fila_xml
+
 
 def _reemplazar_bloque_productos(xml, trs, primera_idx, total_idx_fallback,
                                   productos, total_cajas, total_neto, total_bruto,
-                                  pallets, kg_pallets):
+                                  pallets, kg_pallets, neto_celda=6, bruto_celda=7):
     fila_pal, ini_pal, fin_pal, idx_pal = _get_fila_por_contenido(xml, trs, 'ACONDICIONADO EN')
     total_idx = (idx_pal + 1) if idx_pal is not None else total_idx_fallback
 
@@ -417,12 +405,11 @@ def _reemplazar_bloque_productos(xml, trs, primera_idx, total_idx_fallback,
         nombre_bi = armar_nombre_bilingue(prod.get('nombre_es', ''), prod.get('nombre_en', ''))
         nuevas_filas += _construir_fila(
             fila_modelo, prod.get('cajas', ''), nombre_bi,
-            prod.get('neto', ''), prod.get('bruto', '')
+            prod.get('neto', ''), prod.get('bruto', ''), neto_celda, bruto_celda
         )
 
     nueva_pal = _reemplazar_pallets_en_fila(fila_pal, pallets, kg_pallets) if fila_pal else ''
 
-    # Calcular total bruto incluyendo kg pallets
     try:
         total_bruto_final = '{:.2f}'.format(float(total_bruto) + float(kg_pallets or 0))
     except Exception:
@@ -435,135 +422,215 @@ def _reemplazar_bloque_productos(xml, trs, primera_idx, total_idx_fallback,
         nueva_total = nueva_total.replace('>' + nums_tot[1] + '<', '>' + str(total_neto) + '<', 1)
         nueva_total = nueva_total.replace('>' + nums_tot[2] + '<', '>' + str(total_bruto_final) + '<', 1)
 
-    # Armar XML con productos nuevos
     xml_nuevo = xml[:ini_mod] + nuevas_filas + nueva_pal + nueva_total + xml[fin_tot:]
-
-    # Buscar y reemplazar pallets en el XML final (por si quedaron restos)
     xml_nuevo = _reemplazar_pallets_en_fila(xml_nuevo, pallets, kg_pallets)
-
     return xml_nuevo
 
 
-def fmt_fecha_aereo(f):
+def fmt_fecha_al_to(f):
     if f and ' al ' in f.lower():
         partes = re.split(r'\s+al\s+', f, flags=re.IGNORECASE)
         return partes[0] + ' AL/TO ' + partes[1]
     return f or ''
 
 
-def fmt_fecha_maritimo(f):
+def fmt_fecha_al(f):
     if f and ' al ' in f.lower():
         partes = re.split(r'\s+al\s+', f, flags=re.IGNORECASE)
         return partes[0] + ' AL ' + partes[1]
     return f or ''
 
 
-def generar_sanitario(docx_bytes, datos, tipo_via):
+def generar_sanitario(docx_bytes, datos, tipo_via, destino):
     alertas = []
     with zipfile.ZipFile(io.BytesIO(docx_bytes), 'r') as z:
         archivos = {n: z.read(n) for n in z.namelist()}
     xml = archivos['word/document.xml'].decode('utf-8')
-    if tipo_via == 'aereo':
-        xml, al = _gen_aereo(xml, datos)
+    if destino == 'singapur':
+        if tipo_via == 'aereo':
+            xml, al = _gen_singapur_aereo(xml, datos)
+        else:
+            xml, al = _gen_singapur_maritimo(xml, datos)
     else:
-        xml, al = _gen_maritimo(xml, datos)
+        if tipo_via == 'aereo':
+            xml, al = _gen_malasia_aereo(xml, datos)
+        else:
+            xml, al = _gen_malasia_maritimo(xml, datos)
     alertas.extend(al)
     archivos['word/document.xml'] = xml.encode('utf-8')
     out = io.BytesIO()
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
-        for n, d in archivos.items():
-            z.writestr(n, d)
+        for n, d in archivos.items(): z.writestr(n, d)
     out.seek(0)
     return out.read(), alertas
 
 
-def _gen_aereo(xml, datos):
-    alertas = []
-    productos   = datos.get('productos', [])
-    total_cajas = datos.get('total_cajas', '')
-    total_neto  = datos.get('total_neto', '')
-    total_bruto = datos.get('total_bruto', '')
-    pallets     = datos.get('pallets', '1')
-    kg_pallets  = datos.get('kg_pallets', '')
+# ── MALASIA AÉREO ────────────────────────────────────────────────────────────
 
+def _gen_malasia_aereo(xml, datos):
+    alertas = []
     trs = get_trs(xml)
     xml = _reemplazar_bloque_productos(
         xml, trs, primera_idx=5, total_idx_fallback=19,
-        productos=productos,
-        total_cajas=total_cajas, total_neto=total_neto, total_bruto=total_bruto,
-        pallets=pallets, kg_pallets=kg_pallets
+        productos=datos.get('productos', []),
+        total_cajas=datos.get('total_cajas',''), total_neto=datos.get('total_neto',''), total_bruto=datos.get('total_bruto',''),
+        pallets=datos.get('pallets','1'), kg_pallets=datos.get('kg_pallets',''),
+        neto_celda=6, bruto_celda=7
     )
-
-    f_faena = datos.get('fecha_faena', '')
-    f_prod  = datos.get('fecha_produccion', '')
-    f_venc  = datos.get('fecha_vencimiento', '')
-    if f_faena: xml = xml.replace('>16/12/2025<', '>' + fmt_fecha_aereo(f_faena) + '<')
-    if f_prod:  xml = xml.replace('>20/12/2025 AL/TO 22/12/2025<', '>' + fmt_fecha_aereo(f_prod) + '<')
-    if f_venc:  xml = xml.replace('>19/04/2026 AL/TO 21/04/2026<', '>' + fmt_fecha_aereo(f_venc) + '<')
-
-    transporte = datos.get('transporte', '')
-    if transporte:
-        xml = xml.replace('>VUELO / FLIGHT: EK248<', '>' + transporte + '<')
-
+    f_faena = datos.get('fecha_faena','')
+    f_prod  = datos.get('fecha_produccion','')
+    f_venc  = datos.get('fecha_vencimiento','')
+    if f_faena: xml = xml.replace('>16/12/2025<', '>' + fmt_fecha_al_to(f_faena) + '<')
+    if f_prod:  xml = xml.replace('>20/12/2025 AL/TO 22/12/2025<', '>' + fmt_fecha_al_to(f_prod) + '<')
+    if f_venc:  xml = xml.replace('>19/04/2026 AL/TO 21/04/2026<', '>' + fmt_fecha_al_to(f_venc) + '<')
+    transporte = datos.get('transporte','')
+    if transporte: xml = xml.replace('>VUELO / FLIGHT: EK248<', '>VUELO / FLIGHT: ' + transporte + '<')
     fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
-    try:
-        dia, mes, anio = fecha_emi.split('/')
-    except Exception:
-        dia = mes = anio = ''
-        alertas.append('Fecha de emision no parseada - completar manualmente')
-    xml = xml.replace('>2026<',  '>' + anio + '<',  1)
-    xml = xml.replace('>01 <',   '>' + mes + ' <',  1)
-    xml = xml.replace('>23<',    '>' + dia + '<',   1)
-
+    try: dia, mes, anio = fecha_emi.split('/')
+    except: dia = mes = anio = ''; alertas.append('Fecha emision no parseada')
+    xml = xml.replace('>2026<',  '>' + anio + '<', 1)
+    xml = xml.replace('>01 <',   '>' + mes + ' <', 1)
+    xml = xml.replace('>23<',    '>' + dia + '<', 1)
     return xml, alertas
 
 
-def _gen_maritimo(xml, datos):
-    alertas = []
-    productos   = datos.get('productos', [])
-    total_cajas = datos.get('total_cajas', '')
-    total_neto  = datos.get('total_neto', '')
-    total_bruto = datos.get('total_bruto', '')
-    pallets     = datos.get('pallets', '1')
-    kg_pallets  = datos.get('kg_pallets', '')
+# ── MALASIA MARÍTIMO ─────────────────────────────────────────────────────────
 
+def _gen_malasia_maritimo(xml, datos):
+    alertas = []
     trs = get_trs(xml)
     xml = _reemplazar_bloque_productos(
         xml, trs, primera_idx=5, total_idx_fallback=15,
-        productos=productos,
-        total_cajas=total_cajas, total_neto=total_neto, total_bruto=total_bruto,
-        pallets=pallets, kg_pallets=kg_pallets
+        productos=datos.get('productos', []),
+        total_cajas=datos.get('total_cajas',''), total_neto=datos.get('total_neto',''), total_bruto=datos.get('total_bruto',''),
+        pallets=datos.get('pallets','1'), kg_pallets=datos.get('kg_pallets',''),
+        neto_celda=6, bruto_celda=7
     )
-
-    f_faena = datos.get('fecha_faena', '')
-    f_prod  = datos.get('fecha_produccion', '')
-    f_venc  = datos.get('fecha_vencimiento', '')
-    if f_faena: xml = xml.replace('>28/05/2026 AL 05/06/2026<', '>' + fmt_fecha_maritimo(f_faena) + '<')
-    if f_prod:  xml = xml.replace('>03/06/2026 AL 10/06/2026<', '>' + fmt_fecha_maritimo(f_prod) + '<')
-    if f_venc:  xml = xml.replace('>01/10/2026 AL 08/10/2026<', '>' + fmt_fecha_maritimo(f_venc) + '<')
-
-    transporte = datos.get('transporte', '')
-    if transporte:
-        xml = xml.replace('>VAPOR / VESSEL: TIGER PLATA<', '>' + transporte + '<')
-
-    contenedor    = datos.get('contenedor', '')
-    precinto_afip = datos.get('precinto_afip', '')
+    f_faena = datos.get('fecha_faena','')
+    f_prod  = datos.get('fecha_produccion','')
+    f_venc  = datos.get('fecha_vencimiento','')
+    if f_faena: xml = xml.replace('>28/05/2026 AL 05/06/2026<', '>' + fmt_fecha_al(f_faena) + '<')
+    if f_prod:  xml = xml.replace('>03/06/2026 AL 10/06/2026<', '>' + fmt_fecha_al(f_prod) + '<')
+    if f_venc:  xml = xml.replace('>01/10/2026 AL 08/10/2026<', '>' + fmt_fecha_al(f_venc) + '<')
+    transporte = datos.get('transporte','')
+    if transporte: xml = xml.replace('>VAPOR / VESSEL: TIGER PLATA<', '>VAPOR / VESSEL: ' + transporte + '<')
+    contenedor    = datos.get('contenedor','')
+    precinto_afip = datos.get('precinto_afip','')
     if contenedor:    xml = xml.replace('>TCLU129408-4<', '>' + contenedor + '<')
     if precinto_afip: xml = xml.replace('>BAH79585<',    '>' + precinto_afip + '<')
     if not contenedor:    alertas.append('Contenedor no encontrado - completar manualmente')
-    if not precinto_afip: alertas.append('Precinto A.F.I.P. no encontrado - completar manualmente')
-
+    if not precinto_afip: alertas.append('Precinto AFIP no encontrado - completar manualmente')
     fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
-    try:
-        dia, mes, anio = fecha_emi.split('/')
-    except Exception:
-        dia = mes = anio = ''
-        alertas.append('Fecha de emision no parseada - completar manualmente')
+    try: dia, mes, anio = fecha_emi.split('/')
+    except: dia = mes = anio = ''; alertas.append('Fecha emision no parseada')
     xml = xml.replace('>:      2026<', '>:      ' + anio + '<')
     xml = re.sub(r'>\)\s+\d{2}\s+<', ')         ' + mes + ' <', xml, count=1)
     xml = xml.replace('>14<', '>' + dia + '<', 1)
-
     return xml, alertas
+
+
+# ── SINGAPUR AÉREO ───────────────────────────────────────────────────────────
+
+def _gen_singapur_aereo(xml, datos):
+    alertas = []
+    trs = get_trs(xml)
+    xml = _reemplazar_bloque_productos(
+        xml, trs, primera_idx=5, total_idx_fallback=17,
+        productos=datos.get('productos', []),
+        total_cajas=datos.get('total_cajas',''), total_neto=datos.get('total_neto',''), total_bruto=datos.get('total_bruto',''),
+        pallets=datos.get('pallets','1'), kg_pallets=datos.get('kg_pallets',''),
+        neto_celda=5, bruto_celda=6
+    )
+    # Fechas
+    f_faena = datos.get('fecha_faena','')
+    f_prod  = datos.get('fecha_produccion','')
+    f_venc  = datos.get('fecha_vencimiento','')
+    if f_faena: xml = xml.replace('>07/05/2026 AL/TO 01/06/2026<', '>' + fmt_fecha_al_to(f_faena) + '<')
+    if f_prod:  xml = xml.replace('>12/05/2026 AL/TO 03/06/2026<', '>' + fmt_fecha_al_to(f_prod) + '<')
+    if f_venc:  xml = xml.replace('>31/07/2026 AL/TO 01/10/2026<', '>' + fmt_fecha_al_to(f_venc) + '<')
+    # Transporte (vuelo)
+    transporte = datos.get('transporte','')
+    if transporte: xml = xml.replace('>: LX093<', '>: ' + transporte + '<')
+    # Temperatura
+    es_congelado = datos.get('es_congelado', False)
+    xml = _set_temperatura_singapur(xml, es_congelado, tipo_via='aereo')
+    # Consignatario
+    xml = xml.replace('>FOODIE MARKET PLACE PTE. LTD<', '>FOODIE MARKET PLACE PTE. LTD<')  # placeholder
+    # Fecha emision
+    fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
+    xml = xml.replace('>04/06/2026<', '>' + fecha_emi + '<')
+    return xml, alertas
+
+
+# ── SINGAPUR MARÍTIMO ────────────────────────────────────────────────────────
+
+def _gen_singapur_maritimo(xml, datos):
+    alertas = []
+    trs = get_trs(xml)
+    xml = _reemplazar_bloque_productos(
+        xml, trs, primera_idx=5, total_idx_fallback=10,
+        productos=datos.get('productos', []),
+        total_cajas=datos.get('total_cajas',''), total_neto=datos.get('total_neto',''), total_bruto=datos.get('total_bruto',''),
+        pallets=datos.get('pallets','1'), kg_pallets=datos.get('kg_pallets',''),
+        neto_celda=6, bruto_celda=7
+    )
+    # Fechas
+    f_faena = datos.get('fecha_faena','')
+    f_prod  = datos.get('fecha_produccion','')
+    f_venc  = datos.get('fecha_vencimiento','')
+    if f_faena: xml = xml.replace('>09/03/2026 AL/TO 19/03/2026<', '>' + fmt_fecha_al_to(f_faena) + '<')
+    if f_prod:  xml = xml.replace('>12/03/2026 AL/TO 21/03/2026<', '>' + fmt_fecha_al_to(f_prod) + '<')
+    if f_venc:  xml = xml.replace('>12/03/2028 AL/TO 21/03/2028<', '>' + fmt_fecha_al_to(f_venc) + '<')
+    # Transporte (barco)
+    transporte = datos.get('transporte','')
+    if transporte: xml = xml.replace('>: SAN ANTONIO MAERSK<', '>: ' + transporte + '<')
+    # Contenedor y precinto
+    contenedor    = datos.get('contenedor','')
+    precinto_afip = datos.get('precinto_afip','')
+    if contenedor:    xml = xml.replace('>MNBU9179760<', '>' + contenedor + '<')
+    if precinto_afip: xml = xml.replace('>BAH66389<',   '>' + precinto_afip + '<')
+    if not contenedor:    alertas.append('Contenedor no encontrado - completar manualmente')
+    if not precinto_afip: alertas.append('Precinto AFIP no encontrado - completar manualmente')
+    # Temperatura
+    es_congelado = datos.get('es_congelado', False)
+    xml = _set_temperatura_singapur(xml, es_congelado, tipo_via='maritimo')
+    # Fecha emision
+    fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
+    xml = xml.replace('>14/04/2026<', '>' + fecha_emi + '<')
+    return xml, alertas
+
+
+# ── TEMPERATURA SINGAPUR ─────────────────────────────────────────────────────
+
+def _set_temperatura_singapur(xml, es_congelado, tipo_via):
+    # Aéreo plantilla: X en refrigeración (pos 2), congelación vacío (pos 3)
+    # Marítimo plantilla: X en congelación (pos 3), refrigeración vacío (pos 1)
+    # Si es_congelado: X debe estar en congelación
+    # Si no es_congelado (enfriado): X debe estar en refrigeración
+    if tipo_via == 'aereo':
+        if es_congelado:
+            # Mover X de refrigeración a congelación
+            # Quitar X de refrigeración, poner X en congelación
+            xml = re.sub(
+                r'(De refrigeraci[oó]n[^<]*</w:t>[^<]*<[^>]+>[^<]*</[^>]+>\s*<[^>]+>\s*)<w:t>X</w:t>',
+                r'\1<w:t></w:t>', xml, count=1
+            )
+            xml = re.sub(
+                r'(De congelaci[oó]n[^<]*</w:t>[^<]*<[^>]+>[^<]*</[^>]+>\s*<[^>]+>\s*)<w:t></w:t>',
+                r'\1<w:t>X</w:t>', xml, count=1
+            )
+    else:  # maritimo
+        if not es_congelado:
+            # Mover X de congelación a refrigeración
+            xml = re.sub(
+                r'(De congelaci[oó]n[^<]*</w:t>[^<]*<[^>]+>[^<]*</[^>]+>\s*<[^>]+>\s*)<w:t>X</w:t>',
+                r'\1<w:t></w:t>', xml, count=1
+            )
+            xml = re.sub(
+                r'(De refrigeraci[oó]n[^<]*</w:t>[^<]*<[^>]+>[^<]*</[^>]+>\s*<[^>]+>\s*)<w:t></w:t>',
+                r'\1<w:t>X</w:t>', xml, count=1
+            )
+    return xml
 
 
 if __name__ == '__main__':
