@@ -44,6 +44,12 @@ def generar():
 
         datos = {**datos_remito, **datos_piqueo, **datos_prov}
         datos['destino'] = destino
+        # Pallets: provisorio tiene prioridad, piqueo como fallback
+        if not datos.get('pallets'):
+            datos['pallets'] = datos_piqueo.get('pallets_piqueo')
+        # Congelado: remito tiene prioridad sobre provisorio
+        if datos_remito.get('es_congelado') is not None:
+            datos['es_congelado'] = datos_remito['es_congelado']
         for prod in datos.get('productos', []):
             cod = prod.get('codigo', '')
             if cod in reporte.get('descripciones', {}):
@@ -88,34 +94,70 @@ def generar():
 def leer_piqueo(file):
     wb = openpyxl.load_workbook(file)
     ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+
+    # Buscar fila de headers dinamicamente
+    hdr_idx = None
+    for i, row in enumerate(rows[:5]):
+        if row and any(str(v or '').strip() in ('Cod Prod', 'Producto', 'Fecha F', 'Fecha P') for v in row):
+            hdr_idx = i
+            break
+    if hdr_idx is None:
+        hdr_idx = 0
+
+    hdr = rows[hdr_idx]
+
+    def col_idx(nombres):
+        for i, h in enumerate(hdr):
+            if h and any(n.lower() in str(h).lower() for n in nombres):
+                return i
+        return None
+
+    c_cod     = col_idx(['Cod Prod', 'Codigo'])
+    c_fecha_f = col_idx(['Fecha F'])
+    c_fecha_p = col_idx(['Fecha P'])
+    c_fecha_v = col_idx(['Fecha Ven', 'Vencimiento'])
+    c_pallet  = col_idx(['Pallet'])
+
     faena_min = faena_max = None
     prod_min  = prod_max  = None
     venc_min  = venc_max  = None
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if not row or not row[1]:
-            continue
-        fecha_f   = row[7]
-        fecha_p   = row[6]
-        fecha_ven = row[10]
+    pallets_set = set()
+
+    for row in rows[hdr_idx + 1:]:
+        if not row: continue
+        cod = row[c_cod] if c_cod is not None and c_cod < len(row) else None
+        if not cod: continue
+
+        if c_pallet is not None and c_pallet < len(row) and row[c_pallet]:
+            pallets_set.add(str(row[c_pallet]))
+
+        fecha_f = row[c_fecha_f] if c_fecha_f is not None and c_fecha_f < len(row) else None
+        fecha_p = row[c_fecha_p] if c_fecha_p is not None and c_fecha_p < len(row) else None
+        fecha_v = row[c_fecha_v] if c_fecha_v is not None and c_fecha_v < len(row) else None
+
         if isinstance(fecha_f, datetime.datetime):
             faena_min = min(faena_min, fecha_f) if faena_min else fecha_f
             faena_max = max(faena_max, fecha_f) if faena_max else fecha_f
         if isinstance(fecha_p, datetime.datetime):
             prod_min = min(prod_min, fecha_p) if prod_min else fecha_p
             prod_max = max(prod_max, fecha_p) if prod_max else fecha_p
-        if isinstance(fecha_ven, datetime.datetime):
-            venc_min = min(venc_min, fecha_ven) if venc_min else fecha_ven
-            venc_max = max(venc_max, fecha_ven) if venc_max else fecha_ven
+        if isinstance(fecha_v, datetime.datetime):
+            venc_min = min(venc_min, fecha_v) if venc_min else fecha_v
+            venc_max = max(venc_max, fecha_v) if venc_max else fecha_v
+
     def fmt_rango(d_min, d_max):
         if not d_min: return None
         s = d_min.strftime('%d/%m/%Y')
-        if d_max and d_max != d_min:
+        if d_max and isinstance(d_max, datetime.datetime) and d_max != d_min:
             s += ' al ' + d_max.strftime('%d/%m/%Y')
         return s
+
     return {
         'fecha_faena':       fmt_rango(faena_min, faena_max),
         'fecha_produccion':  fmt_rango(prod_min,  prod_max),
         'fecha_vencimiento': fmt_rango(venc_min,  venc_max),
+        'pallets_piqueo':    str(len(pallets_set)) if pallets_set else None,
     }
 
 
@@ -224,6 +266,13 @@ def leer_remito(pdf_bytes):
         else:
             i += 1
     datos['productos'] = productos
+
+    # Detectar congelado desde observaciones del remito
+    if re.search(r'CONGELAD', texto, re.IGNORECASE):
+        datos['es_congelado'] = True
+    else:
+        datos['es_congelado'] = False
+
     return datos
 
 
